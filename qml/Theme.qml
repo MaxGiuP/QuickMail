@@ -1,21 +1,37 @@
 pragma Singleton
 
 import QtQuick
+import Quickshell
+import Quickshell.Io
 
 QtObject {
-    readonly property color canvas: "#111318"
-    readonly property color surface: "#181b21"
-    readonly property color surfaceRaised: "#20242c"
-    readonly property color surfaceHover: "#292e37"
-    readonly property color surfaceSelected: "#263d57"
-    readonly property color border: "#343a45"
-    readonly property color borderSoft: "#292e37"
-    readonly property color text: "#f1f3f6"
-    readonly property color textSecondary: "#b4bbc6"
-    readonly property color textMuted: "#858e9d"
-    readonly property color accent: "#66aaf0"
-    readonly property color accentSoft: "#1f4b73"
-    readonly property color danger: "#ff7078"
+    id: root
+
+    readonly property string systemPalettePath: {
+        const stateHome = String(Quickshell.env("XDG_STATE_HOME") || "").trim()
+        const home = String(Quickshell.env("HOME") || "").trim()
+        const stateRoot = stateHome !== "" ? stateHome : home !== "" ? home + "/.local/state" : ""
+        return stateRoot !== "" ? stateRoot + "/quickshell/user/generated/colors.json" : ""
+    }
+    property var systemPalette: ({})
+    readonly property bool followsSystemPalette: Object.keys(systemPalette).length > 0
+
+    readonly property color canvas: paletteColor("background", "#111318")
+    readonly property color surface: paletteColor("surface_container_low", "#181b21")
+    readonly property color surfaceRaised: paletteColor("surface_container", "#20242c")
+    readonly property color surfaceHover: paletteColor("surface_container_high", "#292e37")
+    readonly property color surfaceSelected: paletteColor("secondary_container", "#263d57")
+    readonly property color border: paletteColor("outline", "#343a45")
+    readonly property color borderSoft: paletteColor("outline_variant", "#292e37")
+    readonly property color text: paletteColor("on_surface", "#f1f3f6")
+    readonly property color textSecondary: paletteColor("on_surface_variant", "#b4bbc6")
+    readonly property color textMuted: paletteColor("outline", "#858e9d")
+    readonly property color accent: paletteColor("primary", "#66aaf0")
+    readonly property color accentText: paletteColor("on_primary", "#111318")
+    readonly property color accentSoft: paletteColor("primary_container", "#1f4b73")
+    readonly property color accentSoftText: paletteColor("on_primary_container", "#f1f3f6")
+    readonly property color danger: paletteColor("error", "#ff7078")
+    readonly property color dangerText: paletteColor("on_error", "#111318")
     readonly property color warning: "#f0bd6a"
     readonly property color success: "#72d6a2"
 
@@ -31,6 +47,34 @@ QtObject {
     readonly property int space5: 20
     readonly property int space6: 24
     readonly property int rowHeight: 64
+
+    function paletteColor(name, fallback) {
+        const value = root.systemPalette ? root.systemPalette[name] : undefined
+        return typeof value === "string" && value !== "" ? value : fallback
+    }
+
+    function loadSystemPalette(text) {
+        try {
+            const parsed = JSON.parse(String(text || ""))
+            root.systemPalette = parsed && typeof parsed === "object" ? parsed : ({})
+        } catch (error) {
+            console.warn("[QuickMail] Could not parse the system Material palette:", error)
+            root.systemPalette = ({})
+        }
+    }
+
+    property FileView systemPaletteFile: FileView {
+        path: root.systemPalettePath
+        watchChanges: true
+        blockWrites: true
+        onFileChanged: reload()
+        onLoaded: root.loadSystemPalette(text())
+        onLoadFailed: error => {
+            if (error !== FileViewError.FileNotFound)
+                console.warn("[QuickMail] Could not load the system Material palette:", error)
+            root.systemPalette = ({})
+        }
+    }
 
     function initials(name) {
         const words = String(name || "?").trim().split(/\s+/)

@@ -335,7 +335,7 @@ Rectangle {
                     Layout.fillWidth: true
                     spacing: 10
                     Text { text: "Mailbox"; color: Theme.text; font.family: Theme.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold }
-                    ComboBox {
+                    StyledComboBox {
                         id: manualPreset
                         Layout.fillWidth: true
                         model: [
@@ -362,7 +362,7 @@ Rectangle {
                         Layout.fillWidth: true
                         TextField { id: imapHost; Layout.fillWidth: true; placeholderText: "imap.example.com" }
                         TextField { id: imapPort; Layout.preferredWidth: 88; text: "993"; validator: IntValidator { bottom: 1; top: 65535 } }
-                        ComboBox { id: imapSecurity; model: [{ text: "TLS", value: "tls" }, { text: "STARTTLS", value: "starttls" }]; textRole: "text"; valueRole: "value" }
+                        StyledComboBox { id: imapSecurity; model: [{ text: "TLS", value: "tls" }, { text: "STARTTLS", value: "starttls" }]; textRole: "text"; valueRole: "value" }
                     }
                     TextField { id: imapUsername; Layout.fillWidth: true; placeholderText: "IMAP username" }
                     TextField { id: password; Layout.fillWidth: true; placeholderText: "Password or app password"; echoMode: TextInput.Password }
@@ -371,7 +371,7 @@ Rectangle {
                         Layout.fillWidth: true
                         TextField { id: smtpHost; Layout.fillWidth: true; placeholderText: "smtp.example.com" }
                         TextField { id: smtpPort; Layout.preferredWidth: 88; text: "587"; validator: IntValidator { bottom: 1; top: 65535 } }
-                        ComboBox { id: smtpSecurity; model: [{ text: "STARTTLS", value: "starttls" }, { text: "TLS", value: "tls" }]; textRole: "text"; valueRole: "value" }
+                        StyledComboBox { id: smtpSecurity; model: [{ text: "STARTTLS", value: "starttls" }, { text: "TLS", value: "tls" }]; textRole: "text"; valueRole: "value" }
                     }
                     TextField { id: smtpUsername; Layout.fillWidth: true; placeholderText: "SMTP username (defaults to IMAP)" }
                     CheckBox { id: smtpSamePassword; text: "Use the same password for sending"; checked: true }

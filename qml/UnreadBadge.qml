@@ -33,7 +33,7 @@ Control {
                 id: badgeText
                 anchors.centerIn: parent
                 text: root.count > 99 ? "99+" : String(root.count)
-                color: Theme.canvas
+                color: Theme.accentText
                 font.family: Theme.fontFamily
                 font.pixelSize: 9
                 font.weight: Font.Bold

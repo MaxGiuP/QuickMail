@@ -20,7 +20,9 @@ Button {
         Text {
             visible: root.iconName !== ""
             text: Theme.icon(root.iconName)
-            color: root.enabled ? Theme.canvas : Theme.textMuted
+            color: root.enabled
+                ? (root.destructive ? Theme.dangerText : Theme.accentText)
+                : Theme.textMuted
             font.family: Theme.iconFont
             font.pixelSize: 19
             anchors.verticalCenter: parent.verticalCenter
@@ -28,7 +30,9 @@ Button {
         Text {
             text: root.text
             textFormat: Text.PlainText
-            color: root.enabled ? Theme.canvas : Theme.textMuted
+            color: root.enabled
+                ? (root.destructive ? Theme.dangerText : Theme.accentText)
+                : Theme.textMuted
             font.family: Theme.fontFamily
             font.pixelSize: 14
             font.weight: Font.DemiBold

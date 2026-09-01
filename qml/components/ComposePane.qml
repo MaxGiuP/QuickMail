@@ -418,7 +418,7 @@ Rectangle {
                         font.family: Theme.fontFamily
                         font.pixelSize: 13
                     }
-                    ComboBox {
+                    StyledComboBox {
                         id: fromAccount
                         Layout.fillWidth: true
                         model: store.accounts
