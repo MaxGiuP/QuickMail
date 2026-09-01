@@ -6,6 +6,7 @@ Item {
 
     property string html: ""
     property bool allowRemoteContent: true
+    property bool trustedSanitizedHtml: false
     property color foregroundColor: "#202124"
     property color mutedColor: "#6b7280"
     property color linkColor: "#2563eb"
@@ -16,6 +17,7 @@ Item {
     signal preferredHeightChanged(real height)
 
     readonly property var safeStyleProperties: ({
+        "background": true,
         "background-color": true,
         "border": true,
         "border-bottom": true,
@@ -94,7 +96,8 @@ Item {
     })
     readonly property string safeNamedColors: "aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray grey green greenyellow honeydew hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato transparent turquoise violet wheat white whitesmoke yellow yellowgreen"
     readonly property string renderedHtml: documentForMessage()
-    readonly property color effectivePageColor: messageBackgroundColor()
+    readonly property color effectivePageColor: opaqueCanvasColor(messageBackgroundColor())
+    readonly property color effectiveForegroundColor: messageForegroundColor()
     readonly property real rendererHeight: Math.max(160, nativeRenderer.contentHeight + 8)
     readonly property real renderedContentWidth: Math.max(width, nativeRenderer.contentWidth)
     readonly property bool hasHorizontalOverflow: nativeRenderer.contentWidth > width + 1
@@ -114,7 +117,12 @@ Item {
         }
         if (value && value.r !== undefined) {
             const rgb = "#" + channel(value.r) + channel(value.g) + channel(value.b)
-            return Number(value.a) < 1 ? rgb + channel(value.a) : rgb
+            return Number(value.a) < 1
+                ? "rgba(" + Math.round(Number(value.r) * 255) + ","
+                    + Math.round(Number(value.g) * 255) + ","
+                    + Math.round(Number(value.b) * 255) + ","
+                    + Math.max(0, Math.min(1, Number(value.a))) + ")"
+                : rgb
         }
         const text = String(value || "")
         return /^#[0-9a-f]{3,8}$/i.test(text) ? text : "#000000"
@@ -139,6 +147,18 @@ Item {
 
     function isSafeStyleProperty(name) {
         return safeStyleProperties[String(name || "").toLowerCase()] === true
+    }
+
+    function isPureCssColor(value) {
+        let normalized = String(value || "").trim().toLowerCase()
+        normalized = normalized.replace(/\s*!\s*important\s*$/i, "").trim()
+        if (/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(normalized))
+            return true
+        if (/^[a-z][a-z-]{0,31}$/i.test(normalized))
+            return (" " + safeNamedColors + " ").indexOf(" " + normalized + " ") >= 0
+        const match = normalized.match(/^(rgba?|hsla?)\(([^()]*)\)$/i)
+        return match !== null && match[2] !== ""
+            && /^[0-9+.,%/\-\s]+$/.test(match[2])
     }
 
     function isSafeCssDimension(value) {
@@ -175,8 +195,12 @@ Item {
             const declaration = declarations[index]
             const colon = declaration.indexOf(":")
             if (colon <= 0) continue
-            const property = declaration.substring(0, colon).trim().toLowerCase()
+            let property = declaration.substring(0, colon).trim().toLowerCase()
             const styleValue = declaration.substring(colon + 1).trim()
+            if (property === "background") {
+                if (!isPureCssColor(styleValue)) continue
+                property = "background-color"
+            }
             if (!isSafeStyleProperty(property) || styleValue === "") continue
 
             // Decode numeric entities before testing. Backslashes are rejected
@@ -292,21 +316,48 @@ Item {
     }
 
     function parsedCssColor(value) {
-        const text = String(value || "").trim()
-        if (/^#[0-9a-f]{3,8}$/i.test(text)) return Qt.color(text)
+        const text = String(value || "").replace(/\s*!\s*important\s*$/i, "").trim()
+        const hex = text.match(/^#([0-9a-f]+)$/i)
+        if (hex && [3, 4, 6, 8].indexOf(hex[1].length) >= 0) {
+            let digits = hex[1]
+            if (digits.length <= 4)
+                digits = digits.split("").map(character => character + character).join("")
+            const red = parseInt(digits.substring(0, 2), 16) / 255
+            const green = parseInt(digits.substring(2, 4), 16) / 255
+            const blue = parseInt(digits.substring(4, 6), 16) / 255
+            const alpha = digits.length === 8
+                ? parseInt(digits.substring(6, 8), 16) / 255 : 1
+            return Qt.rgba(red, green, blue, alpha)
+        }
         if (/^[a-z]+$/i.test(text)
                 && (" " + safeNamedColors + " ").indexOf(
                     " " + text.toLowerCase() + " ") >= 0)
             return Qt.color(text)
-        const match = text.match(/^rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)(?:\s*,\s*([0-9.]+))?\s*\)$/i)
+        const match = text.match(/^rgba?\(\s*([0-9.]+%?)\s*,\s*([0-9.]+%?)\s*,\s*([0-9.]+%?)(?:\s*,\s*([0-9.]+%?))?\s*\)$/i)
         if (!match) return null
-        const red = Math.max(0, Math.min(255, Number(match[1]))) / 255
-        const green = Math.max(0, Math.min(255, Number(match[2]))) / 255
-        const blue = Math.max(0, Math.min(255, Number(match[3]))) / 255
+        const channel = function(component) {
+            const source = String(component)
+            return source[source.length - 1] === "%"
+                ? Math.max(0, Math.min(100, Number(source.slice(0, -1)))) / 100
+                : Math.max(0, Math.min(255, Number(source))) / 255
+        }
+        const red = channel(match[1])
+        const green = channel(match[2])
+        const blue = channel(match[3])
         const alpha = match[4] === undefined
-            ? 1 : Math.max(0, Math.min(1, Number(match[4])))
+            ? 1 : String(match[4]).slice(-1) === "%"
+                ? Math.max(0, Math.min(100, Number(String(match[4]).slice(0, -1)))) / 100
+                : Math.max(0, Math.min(1, Number(match[4])))
         if (![red, green, blue, alpha].every(isFinite)) return null
         return Qt.rgba(red, green, blue, alpha)
+    }
+
+    function opaqueCanvasColor(value) {
+        if (!value || value.r === undefined) return pageColor
+        const alpha = Math.max(0, Math.min(1, Number(value.a)))
+        return Qt.rgba(Number(value.r) * alpha + (1 - alpha),
+            Number(value.g) * alpha + (1 - alpha),
+            Number(value.b) * alpha + (1 - alpha), 1)
     }
 
     function selectorTargetsMessageBody(value) {
@@ -325,7 +376,7 @@ Item {
         return false
     }
 
-    function stylesheetBodyBackground(source) {
+    function stylesheetBodyColor(source, propertyName) {
         const stylePattern = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi
         let selected = null
         let styleMatch
@@ -340,11 +391,15 @@ Item {
                 for (let index = 0; index < declarations.length; ++index) {
                     const declaration = declarations[index]
                     const colon = declaration.indexOf(":")
-                    if (colon <= 0 || declaration.substring(0, colon).trim()
-                            .toLowerCase() !== "background-color")
+                    if (colon <= 0) continue
+                    const property = declaration.substring(0, colon).trim().toLowerCase()
+                    const wanted = String(propertyName || "").toLowerCase()
+                    if (property !== wanted
+                            && !(wanted === "background-color" && property === "background"))
                         continue
                     const value = declaration.substring(colon + 1)
-                        .replace(/\s*!important\s*$/i, "").trim()
+                        .replace(/\s*!\s*important\s*$/i, "").trim()
+                    if (property === "background" && !isPureCssColor(value)) continue
                     const parsed = parsedCssColor(value)
                     if (parsed !== null) selected = parsed
                 }
@@ -353,28 +408,52 @@ Item {
         return selected
     }
 
-    function messageBackgroundColor() {
-        const source = String(html || "")
-        const stylesheetColor = stylesheetBodyBackground(source)
-        const body = source.match(/<body\b([^>]*)>/i)
-        const quickmailBody = source.match(
+    function rootPresentationAttributes(source) {
+        const body = String(source || "").match(/<body\b([^>]*)>/i)
+        const quickmailBody = String(source || "").match(
             /<div\b(?=[^>]*\bclass\s*=\s*(?:"[^"]*\bquickmail-body\b[^"]*"|'[^']*\bquickmail-body\b[^']*'))([^>]*)>/i)
         const candidates = []
-        if (body) candidates.push(body[1])
         if (quickmailBody) candidates.push(quickmailBody[1])
+        if (body) candidates.push(body[1])
+        return candidates
+    }
+
+    function inlineRootColor(source, propertyName) {
+        const candidates = rootPresentationAttributes(source)
+        const wanted = String(propertyName || "").toLowerCase()
+        for (let index = 0; index < candidates.length; ++index) {
+            const style = candidates[index].match(
+                /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i)
+            if (!style) continue
+            const declarations = String(style[1] !== undefined ? style[1] : style[2])
+                .split(";")
+            for (let declarationIndex = declarations.length - 1;
+                    declarationIndex >= 0; --declarationIndex) {
+                const declaration = declarations[declarationIndex]
+                const colon = declaration.indexOf(":")
+                if (colon <= 0) continue
+                const property = declaration.substring(0, colon).trim().toLowerCase()
+                if (property !== wanted
+                        && !(wanted === "background-color" && property === "background"))
+                    continue
+                const value = declaration.substring(colon + 1).trim()
+                if (property === "background" && !isPureCssColor(value)) continue
+                const parsed = parsedCssColor(value)
+                if (parsed !== null) return parsed
+            }
+        }
+        return null
+    }
+
+    function messageBackgroundColor() {
+        const source = String(html || "")
+        const inlineColor = inlineRootColor(source, "background-color")
+        if (inlineColor !== null) return inlineColor
+        const stylesheetColor = stylesheetBodyColor(source, "background-color")
+        if (stylesheetColor !== null) return stylesheetColor
+        const candidates = rootPresentationAttributes(source)
         for (let index = 0; index < candidates.length; ++index) {
             const attributes = candidates[index]
-            const style = attributes.match(
-                /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i)
-            if (style) {
-                const color = String(style[1] !== undefined ? style[1] : style[2])
-                    .match(/(?:^|;)\s*background-color\s*:\s*([^;]+)/i)
-                if (color) {
-                    const parsed = parsedCssColor(String(color[1])
-                        .replace(/\s*!important\s*$/i, "").trim())
-                    if (parsed !== null) return parsed
-                }
-            }
             const legacy = attributes.match(
                 /\sbgcolor\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i)
             if (legacy) {
@@ -383,44 +462,59 @@ Item {
                 if (parsed !== null) return parsed
             }
         }
-        return stylesheetColor !== null ? stylesheetColor : pageColor
+        return pageColor
+    }
+
+    function messageForegroundColor() {
+        const source = String(html || "")
+        const inlineColor = inlineRootColor(source, "color")
+        if (inlineColor !== null) return inlineColor
+        const stylesheetColor = stylesheetBodyColor(source, "color")
+        return stylesheetColor !== null ? stylesheetColor : foregroundColor
     }
 
     function documentForMessage() {
-        const source = normalizeBodyBackground(
-            sanitizeImageSources(removeExecutableMarkup(html)))
-        const head = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            + "<style type=\"text/css\">"
+        const safeMarkup = trustedSanitizedHtml
+            ? String(html || "") : removeExecutableMarkup(html)
+        const source = normalizeBodyBackground(sanitizeImageSources(safeMarkup))
+        const baseline = "<style type=\"text/css\">"
             + ":root{color-scheme:only light}"
-            + "html,body{margin:0;padding:0;width:100%;max-width:100%;box-sizing:border-box;}"
             + "body{background-color:" + cssColor(effectivePageColor)
-            + ";color:" + cssColor(foregroundColor)
-            + ";font-family:sans-serif;font-size:15px;line-height:1.55;"
-            + "overflow-wrap:anywhere;overflow-x:auto}"
+            + ";color:" + cssColor(effectiveForegroundColor)
+            + ";font-family:sans-serif;font-size:15px;line-height:1.55}"
+            + "a{color:" + cssColor(linkColor) + "}"
+            + "blockquote{margin-left:12px;padding-left:12px;border-left:3px solid "
+            + cssColor(mutedColor) + "}</style>"
+        const constraints = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            + "<style type=\"text/css\">"
+            + "html,body{margin:0;padding:0;width:100%;max-width:100%;box-sizing:border-box;}"
+            + "body{overflow-wrap:anywhere;overflow-x:auto}"
             + ".quickmail-body{display:block;width:100%;max-width:100%;min-width:0;"
             + "box-sizing:border-box;overflow-x:auto}"
-            + "img{max-width:100%!important;height:auto}a{color:"
-            + cssColor(linkColor) + "}"
-            + "blockquote{margin-left:12px;padding-left:12px;border-left:3px solid "
-            + cssColor(mutedColor) + "}"
+            + "img{max-width:100%!important;height:auto}"
             + "table{border-collapse:collapse;max-width:100%!important}"
-            + "td,th{padding:4px;max-width:100%;overflow-wrap:anywhere;word-break:break-word}"
+            + "td,th{max-width:100%;overflow-wrap:anywhere;word-break:break-word}"
             + "pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}</style>"
         if (/<head(?:\s[^>]*)?>/i.test(source)) {
-            if (/<\/head\s*>/i.test(source))
-                return source.replace(/<\/head\s*>/i,
-                    function(match) { return head + match })
-            return source.replace(/<head(?:\s[^>]*)?>/i,
-                function(match) { return match + head })
+            let document = source.replace(/<head(?:\s[^>]*)?>/i,
+                function(match) { return match + baseline })
+            if (/<\/head\s*>/i.test(document))
+                return document.replace(/<\/head\s*>/i,
+                    function(match) { return constraints + match })
+            return document.replace(/<head(?:\s[^>]*)?>/i,
+                function(match) { return match + constraints })
         }
         if (/<html(?:\s[^>]*)?>/i.test(source))
             return source.replace(/<html(?:\s[^>]*)?>/i,
-                function(match) { return match + "<head>" + head + "</head>" })
+                function(match) {
+                    return match + "<head>" + baseline + constraints + "</head>"
+                })
         if (/<body(?:\s[^>]*)?>/i.test(source))
-            return "<!doctype html><html><head>" + head + "</head>" + source
+            return "<!doctype html><html><head>" + baseline + constraints
+                + "</head>" + source
                 + "</html>"
-        return "<!doctype html><html><head>" + head + "</head><body>" + source
-            + "</body></html>"
+        return "<!doctype html><html><head>" + baseline + constraints
+            + "</head><body>" + source + "</body></html>"
     }
 
     function requestExternalOpen(url) {
@@ -461,7 +555,7 @@ Item {
             selectByMouse: true
             activeFocusOnPress: true
             persistentSelection: true
-            color: root.foregroundColor
+            color: root.effectiveForegroundColor
             selectionColor: root.linkColor
             selectedTextColor: root.effectivePageColor
             font.family: "sans-serif"

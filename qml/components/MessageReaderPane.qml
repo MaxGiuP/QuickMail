@@ -14,6 +14,8 @@ Rectangle {
     property string attachmentStatus: ""
     property string pendingSaveSource: ""
     property bool htmlRenderFailed: false
+    property bool htmlRenderReady: false
+    property int htmlRenderGeneration: 0
     readonly property bool threadAvatarLayoutReady: _threadAvatarLayoutReady
     property bool _threadAvatarLayoutReady: false
     property int _threadAvatarLayoutGeneration: 0
@@ -38,6 +40,20 @@ Rectangle {
     readonly property string timestampText: formatTimestamp(message.date_display
         || message.received_display || message.timestamp || message.received_at || "")
 
+    function scheduleHtmlRender() {
+        const generation = ++htmlRenderGeneration
+        htmlRenderReady = false
+        htmlRenderFailed = false
+        // Let the selected-message header paint before QTextDocument performs
+        // the first rich-layout pass, which can take more than one frame.
+        Qt.callLater(function() {
+            if (generation === root.htmlRenderGeneration)
+                root.htmlRenderReady = true
+        })
+    }
+
+    onBodyHtmlChanged: scheduleHtmlRender()
+
     function deferThreadAvatarLayout() {
         const generation = ++_threadAvatarLayoutGeneration
         _threadAvatarLayoutReady = false
@@ -53,7 +69,10 @@ Rectangle {
     }
 
     onThreadCountChanged: deferThreadAvatarLayout()
-    Component.onCompleted: deferThreadAvatarLayout()
+    Component.onCompleted: {
+        deferThreadAvatarLayout()
+        scheduleHtmlRender()
+    }
 
     function singleLine(value) {
         return String(value === undefined || value === null ? "" : value)
@@ -486,15 +505,17 @@ Rectangle {
                     property string loadedHtml: ""
                     Layout.fillWidth: true
                     Layout.preferredHeight: renderedHeight
-                    visible: !store.readerLoading && root.hasHtmlBody && !root.htmlRenderFailed
-                    active: root.hasHtmlBody && !root.htmlRenderFailed
+                    visible: !store.readerLoading && root.hasHtmlBody
+                        && root.htmlRenderReady && !root.htmlRenderFailed
+                    active: root.hasHtmlBody && root.htmlRenderReady && !root.htmlRenderFailed
                     sourceComponent: Component {
                         HtmlMessageView {
                             html: root.bodyHtml
-                            foregroundColor: Theme.text
-                            mutedColor: Theme.textMuted
-                            linkColor: Theme.accent
-                            pageColor: Theme.surface
+                            trustedSanitizedHtml: true
+                            foregroundColor: "#202124"
+                            mutedColor: "#6b7280"
+                            linkColor: "#2563eb"
+                            pageColor: "#ffffff"
                             allowRemoteContent: AppSettings.effectiveAllowRemoteContent
                             onHtmlChanged: htmlLoader.loadedHtml = html
                             Component.onCompleted: htmlLoader.loadedHtml = html

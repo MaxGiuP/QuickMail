@@ -58,6 +58,18 @@ QtObject {
     property var avatarQueue: []
     property var avatarTokenUrls: ({})
     property int nextAvatarToken: 1
+    property var messageDetails: ({})
+    property var messageDetailOrder: []
+    property int messageDetailBytes: 0
+    readonly property int messageDetailLimit: 12
+    readonly property int messageDetailByteLimit: 8 * 1024 * 1024
+    property var messageDetailWaiters: ({})
+    property var detailPrefetchQueue: []
+    property int detailPrefetchGeneration: 0
+    property bool messageDetailPrefetchEnabled: true
+    property var ownedMailRevisions: ({})
+    property var ownedMailRevisionOrder: []
+    property var pendingMailRevisions: []
 
     readonly property var activeAccount: findById(accounts, activeAccountId)
     readonly property var activeFolder: findById(folders, activeFolderId)
@@ -115,6 +127,159 @@ QtObject {
     function isUnread(message) {
         return message && (message.unread === true
             || message.is_read === false || message.read === false)
+    }
+
+    function messageDetailKey(message) {
+        const owner = messageAccountId(message)
+        const id = messageId(message)
+        return owner !== "" && id !== "" ? "$" + owner + "\n" + id : ""
+    }
+
+    function estimatedMessageDetailBytes(message) {
+        if (!message) return 0
+        const html = String(message.bodyHtml || message.body_html || "")
+        const text = String(message.bodyText || message.body_text || "")
+        // QML strings are UTF-16. Include a small allowance for headers and
+        // attachment metadata so one pathological message cannot pin the LRU.
+        return 2048 + 2 * (html.length + text.length)
+    }
+
+    function hasCachedMessageDetail(message) {
+        const key = messageDetailKey(message)
+        return key !== "" && messageDetails[key] !== undefined
+    }
+
+    function cachedMessageDetail(message) {
+        const key = messageDetailKey(message)
+        const detail = key === "" ? undefined : messageDetails[key]
+        if (detail === undefined) return null
+        const order = messageDetailOrder.filter(entry => entry.key !== key)
+        order.push({ key: key, bytes: estimatedMessageDetailBytes(detail) })
+        messageDetailOrder = order
+        return detail
+    }
+
+    function cacheMessageDetail(message) {
+        const key = messageDetailKey(message)
+        if (key === "") return
+        const bytes = estimatedMessageDetailBytes(message)
+        const details = Object.assign({}, messageDetails)
+        let order = messageDetailOrder.filter(entry => entry.key !== key)
+        let total = 0
+        for (let i = 0; i < order.length; ++i) total += Number(order[i].bytes || 0)
+        delete details[key]
+        if (bytes <= messageDetailByteLimit) {
+            details[key] = message
+            order.push({ key: key, bytes: bytes })
+            total += bytes
+        }
+        while (order.length > messageDetailLimit || total > messageDetailByteLimit) {
+            const evicted = order.shift()
+            total -= Number(evicted.bytes || 0)
+            delete details[evicted.key]
+        }
+        messageDetails = details
+        messageDetailOrder = order
+        messageDetailBytes = Math.max(0, total)
+    }
+
+    function patchCachedMessages(ids, changes) {
+        if (!Array.isArray(ids) || ids.length === 0) return
+        const details = Object.assign({}, messageDetails)
+        const keys = Object.keys(details)
+        let changed = false
+        for (let i = 0; i < keys.length; ++i) {
+            const detail = details[keys[i]]
+            if (ids.indexOf(messageId(detail)) < 0) continue
+            details[keys[i]] = Object.assign({}, detail, changes)
+            changed = true
+        }
+        if (changed) messageDetails = details
+    }
+
+    function evictCachedMessages(ids) {
+        if (!Array.isArray(ids) || ids.length === 0) return
+        const details = Object.assign({}, messageDetails)
+        let order = []
+        let total = 0
+        for (let i = 0; i < messageDetailOrder.length; ++i) {
+            const entry = messageDetailOrder[i]
+            const detail = details[entry.key]
+            if (detail && ids.indexOf(messageId(detail)) >= 0) {
+                delete details[entry.key]
+                continue
+            }
+            order.push(entry)
+            total += Number(entry.bytes || 0)
+        }
+        messageDetails = details
+        messageDetailOrder = order
+        messageDetailBytes = total
+    }
+
+    function requestMessageDetail(message, callback) {
+        const cached = cachedMessageDetail(message)
+        if (cached) {
+            Qt.callLater(function() { callback(cached, null) })
+            return
+        }
+        const key = messageDetailKey(message)
+        if (key === "") {
+            Qt.callLater(function() { callback(null, { message: "Invalid message ID" }) })
+            return
+        }
+        const waiting = Object.assign({}, messageDetailWaiters)
+        if (Array.isArray(waiting[key])) {
+            const callbacks = waiting[key].slice()
+            callbacks.push(callback)
+            waiting[key] = callbacks
+            messageDetailWaiters = waiting
+            return
+        }
+        waiting[key] = [callback]
+        messageDetailWaiters = waiting
+        rpc.request(rpc.methods.mailGet, { messageId: messageId(message) },
+            function(result, error) {
+                const callbacksByKey = Object.assign({}, root.messageDetailWaiters)
+                const callbacks = Array.isArray(callbacksByKey[key])
+                    ? callbacksByKey[key].slice() : []
+                delete callbacksByKey[key]
+                root.messageDetailWaiters = callbacksByKey
+                const detail = result ? (result.message || result) : null
+                if (!error && detail && root.messageDetailKey(detail) === key)
+                    root.cacheMessageDetail(detail)
+                for (let i = 0; i < callbacks.length; ++i)
+                    callbacks[i](detail, error)
+            })
+    }
+
+    function queueMessageDetailPrefetch(page, generation) {
+        if (!messageDetailPrefetchEnabled || !rpc.connected
+                || generation !== messageListGeneration) return
+        const queue = []
+        const list = Array.isArray(page) ? page : []
+        for (let i = 0; i < list.length && queue.length < 6; ++i) {
+            if (!hasCachedMessageDetail(list[i])) queue.push(list[i])
+        }
+        detailPrefetchGeneration = generation
+        detailPrefetchQueue = queue
+        if (queue.length > 0) detailPrefetchTimer.restart()
+    }
+
+    function processMessageDetailPrefetch() {
+        if (!rpc.connected || detailPrefetchGeneration !== messageListGeneration) {
+            detailPrefetchQueue = []
+            return
+        }
+        while (detailPrefetchQueue.length > 0
+                && hasCachedMessageDetail(detailPrefetchQueue[0]))
+            detailPrefetchQueue = detailPrefetchQueue.slice(1)
+        if (detailPrefetchQueue.length === 0) return
+        const message = detailPrefetchQueue[0]
+        detailPrefetchQueue = detailPrefetchQueue.slice(1)
+        requestMessageDetail(message, function(_detail, _error) {
+            Qt.callLater(function() { root.processMessageDetailPrefetch() })
+        })
     }
 
     function senderName(message) {
@@ -561,6 +726,7 @@ QtObject {
                         === requestedAccountId
                 })
             }
+            root.queueMessageDetailPrefetch(page, generation)
         })
     }
 
@@ -626,14 +792,8 @@ QtObject {
         threadMessages = [message]
         threadTruncated = false
         const conversationGeneration = ++threadGeneration
-        const shouldMarkRead = isUnread(message)
-        // Queue the cached message body and conversation lookup before the
-        // provider mutation. Even though JSON-RPC responses are correlated by
-        // ID, this ordering also keeps the reader responsive with older or
-        // strictly serial daemon implementations.
-        openThreadMessage(message, true)
+        openThreadMessage(message)
         loadThread(id, conversationGeneration, requestedAccountId)
-        if (shouldMarkRead) markRead(message, true)
     }
 
     function loadThread(messageIdValue, generation, requestedAccountId) {
@@ -658,17 +818,58 @@ QtObject {
         })
     }
 
-    function openThreadMessage(message, deferReadMutation) {
+    function applyOpenedMessage(detail, message, requestedAccountId, shouldMarkRead) {
+        const id = messageId(message)
+        if (!detail || !belongsToAccount(detail, requestedAccountId)) return false
+        const actionIds = []
+        const addActionId = function(value) {
+            const candidate = String(value || "")
+            if (candidate !== "" && actionIds.indexOf(candidate) < 0)
+                actionIds.push(candidate)
+        }
+        const actionMailbox = messageMailboxId(message) || activeFolderId
+        const originalIds = Array.isArray(message.conversationMessageIds)
+            ? message.conversationMessageIds : []
+        for (let i = 0; i < originalIds.length; ++i) addActionId(originalIds[i])
+        for (let i = 0; i < threadMessages.length; ++i) {
+            const member = threadMessages[i]
+            if (messageMailboxId(member) === actionMailbox)
+                addActionId(messageId(member))
+        }
+        addActionId(id)
+        const readState = shouldMarkRead
+            ? { unread: false, is_read: true, read: true } : ({})
+        // Current list metadata wins over a cached detail's flags, while body,
+        // recipients and attachments remain available from the detail record.
+        const conversationDetail = Object.assign({}, detail, message,
+            { conversationMessageIds: actionIds }, readState)
+        selectedMessage = conversationDetail
+        patchThreadMessage(id, conversationDetail)
+        const detailThread = threadKey(conversationDetail)
+        if (threadMessages.length <= 1 && detailThread !== activeThreadId) {
+            activeThreadId = detailThread
+            loadThread(id, threadGeneration, requestedAccountId)
+        }
+        return true
+    }
+
+    function openThreadMessage(message) {
         const id = messageId(message)
         const requestedAccountId = activeAccountId
         if (id === "" || !belongsToAccount(message, requestedAccountId)) return
         const shouldMarkRead = isUnread(message)
         const generation = ++readerGeneration
-        selectedMessage = message
+        const cached = cachedMessageDetail(message)
+        selectedMessage = cached ? Object.assign({}, cached, message) : message
+        if (cached) {
+            readerLoading = false
+            if (applyOpenedMessage(cached, message, requestedAccountId, shouldMarkRead)
+                    && shouldMarkRead)
+                markRead(message, true)
+            return
+        }
         readerLoading = true
-        rpc.request(rpc.methods.mailGet, {
-            messageId: id
-        }, function(result, error) {
+        requestMessageDetail(message, function(detail, error) {
             if (generation !== root.readerGeneration
                     || requestedAccountId !== root.activeAccountId
                     || !root.selectedMessage
@@ -678,44 +879,10 @@ QtObject {
                 root.errorText = error.message || "Could not open this message"
                 return
             }
-            if (result) {
-                const detail = result.message || result
-                if (root.belongsToAccount(detail, requestedAccountId)) {
-                    const actionIds = []
-                    const addActionId = function(value) {
-                        const candidate = String(value || "")
-                        if (candidate !== "" && actionIds.indexOf(candidate) < 0)
-                            actionIds.push(candidate)
-                    }
-                    const actionMailbox = root.messageMailboxId(message)
-                        || root.activeFolderId
-                    const originalIds = Array.isArray(message.conversationMessageIds)
-                        ? message.conversationMessageIds : []
-                    for (let i = 0; i < originalIds.length; ++i)
-                        addActionId(originalIds[i])
-                    for (let i = 0; i < root.threadMessages.length; ++i) {
-                        const member = root.threadMessages[i]
-                        if (root.messageMailboxId(member) === actionMailbox)
-                            addActionId(root.messageId(member))
-                    }
-                    addActionId(id)
-                    const readState = shouldMarkRead
-                        ? { unread: false, is_read: true, read: true } : ({})
-                    const conversationDetail = Object.assign({}, detail,
-                        { conversationMessageIds: actionIds }, readState)
-                    root.selectedMessage = conversationDetail
-                    root.patchThreadMessage(id, conversationDetail)
-                    const detailThread = root.threadKey(conversationDetail)
-                    if (root.threadMessages.length <= 1
-                            && detailThread !== root.activeThreadId) {
-                        root.activeThreadId = detailThread
-                        root.loadThread(id, root.threadGeneration, requestedAccountId)
-                    }
-                }
-            }
+            if (root.applyOpenedMessage(detail, message, requestedAccountId, shouldMarkRead)
+                    && shouldMarkRead)
+                root.markRead(message, true)
         })
-        if (shouldMarkRead && deferReadMutation !== true)
-            markRead(message, true)
     }
 
     function patchThreadMessage(id, changes) {
@@ -759,6 +926,7 @@ QtObject {
         threadMessages = thread
         if (selectedMessage && ids.indexOf(messageId(selectedMessage)) >= 0)
             selectedMessage = Object.assign({}, selectedMessage, changes)
+        patchCachedMessages(ids, changes)
     }
 
     function removeMessage(id) {
@@ -768,11 +936,48 @@ QtObject {
     function removeMessages(ids) {
         messages = messages.filter(message => ids.indexOf(messageId(message)) < 0)
         threadMessages = threadMessages.filter(message => ids.indexOf(messageId(message)) < 0)
+        evictCachedMessages(ids)
         if (selectedMessage && ids.indexOf(messageId(selectedMessage)) >= 0) {
             selectedMessage = null
             clearThread()
         }
         messageListChangedByAction()
+    }
+
+    function rememberOwnedMailRevision(value) {
+        if (value === undefined || value === null || String(value) === "") return
+        const key = "$" + String(value)
+        const revisions = Object.assign({}, ownedMailRevisions)
+        revisions[key] = true
+        let order = ownedMailRevisionOrder.filter(item => item !== key)
+        order.push(key)
+        while (order.length > 32) delete revisions[order.shift()]
+        ownedMailRevisions = revisions
+        ownedMailRevisionOrder = order
+    }
+
+    function queueMailRevision(value) {
+        const pending = pendingMailRevisions.slice()
+        pending.push(value === undefined || value === null ? "" : String(value))
+        pendingMailRevisions = pending
+        mailRefreshTimer.restart()
+    }
+
+    function flushMailRevisions() {
+        const pending = pendingMailRevisions
+        pendingMailRevisions = []
+        const revisions = Object.assign({}, ownedMailRevisions)
+        let needsFullReload = false
+        for (let i = 0; i < pending.length; ++i) {
+            const key = pending[i] === "" ? "" : "$" + pending[i]
+            if (key !== "" && revisions[key] === true) delete revisions[key]
+            else needsFullReload = true
+        }
+        ownedMailRevisions = revisions
+        ownedMailRevisionOrder = ownedMailRevisionOrder.filter(
+            key => revisions[key] === true)
+        if (needsFullReload) reloadAll(true)
+        else loadSnapshot()
     }
 
     function mutate(method, message, params, optimistic, remove) {
@@ -789,7 +994,7 @@ QtObject {
             if (error) {
                 root.errorText = error.message || "That action could not be completed"
                 root.loadMessages(true, !remove)
-            }
+            } else root.rememberOwnedMailRevision(result && result.revision)
         })
     }
 
@@ -1368,9 +1573,10 @@ QtObject {
         function onNotification(method, params) {
             if (method === rpc.events.snapshot) root.applySnapshot(params.snapshot || params)
             else if (method === rpc.events.mail) {
-                // Account counts and the title badge live in the dashboard /
-                // account results, not the mailbox page alone.
-                root.reloadAll(true)
+                // The daemon can publish immediately before it writes the RPC
+                // response. Briefly coalesce revisions so an optimistic local
+                // action refreshes counts without rebuilding the whole list.
+                root.queueMailRevision(params && params.revision)
             }
             else if (method === rpc.events.account) {
                 root.accountStateChanged({ method: method, params: params || ({}) })
@@ -1412,6 +1618,18 @@ QtObject {
         repeat: true
         running: root.rpc.connected && root.accountsLoaded && root.accounts.length > 0
         onTriggered: root.runPeriodicSync()
+    }
+
+    property Timer mailRefreshTimer: Timer {
+        interval: 75
+        repeat: false
+        onTriggered: root.flushMailRevisions()
+    }
+
+    property Timer detailPrefetchTimer: Timer {
+        interval: 100
+        repeat: false
+        onTriggered: root.processMessageDetailPrefetch()
     }
 
     Component.onCompleted: loadInitial()

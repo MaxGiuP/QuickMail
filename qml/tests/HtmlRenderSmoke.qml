@@ -29,7 +29,8 @@ ApplicationWindow {
         pageColor: "#ffffff"
         html: "<!doctype html><html><head>"
             + "<style>.card{background-color:#123456;color:#fedcba;"
-            + "background-image:url(http://tracker.invalid/background.png)}</style>"
+            + "background-image:url(http://tracker.invalid/background.png)}"
+            + "a{color:#cc0000}</style>"
             + "</head><body bgcolor='#f4f1ea'><div id='card' class='card' "
             + "style='padding:12px;font-weight:bold'>Styled mail</div>"
             + "<table id='fixed-card' width='700' align='center' bgcolor='#ffffff' "
@@ -67,6 +68,22 @@ ApplicationWindow {
         html: "<style>.quickmail-body{background-color:#dbeafe}"
             + ".quickmail-body .card{background-color:#ef4444}</style>"
             + "<div class='quickmail-body'><div class='card'>Stylesheet background</div></div>"
+    }
+
+    HtmlMessageView {
+        id: authoredPairRenderer
+        visible: false
+        width: 300
+        html: "<style>.quickmail-body{background:#dbeafe;color:#123456}</style>"
+            + "<div class='quickmail-body'><table bgcolor='#ffffff'><tr><td>"
+            + "<h3>Default dark text</h3></td></tr></table></div>"
+    }
+
+    HtmlMessageView {
+        id: alphaRenderer
+        visible: false
+        width: 300
+        html: "<div class='quickmail-body' style='background:#11223344'>Alpha</div>"
     }
 
     Timer {
@@ -114,6 +131,26 @@ ApplicationWindow {
                     "#dbeafe") && stylesheetBackgroundRenderer.renderedHtml
                     .indexOf("body{background-color:#dbeafe") >= 0,
                 "stylesheet-defined body background did not fill the document viewport")
+            window.expect(Qt.colorEqual(authoredPairRenderer.effectivePageColor, "#dbeafe")
+                    && Qt.colorEqual(authoredPairRenderer.effectiveForegroundColor, "#123456")
+                    && authoredPairRenderer.renderedHtml
+                        .indexOf("background-color:#dbeafe") >= 0,
+                "authored solid background shorthand or root foreground was lost")
+            window.expect(renderer.renderedHtml.indexOf("a{color:#2563eb}")
+                    < renderer.renderedHtml.indexOf("a{color:#cc0000}"),
+                "fallback link colour overrode the sender stylesheet")
+            window.expect(Qt.colorEqual(renderer.effectiveForegroundColor, "#202124"),
+                "light email defaults inherited the dark application foreground")
+            window.expect(alphaRenderer.parsedCssColor("#11223344").r < 0.08
+                    && alphaRenderer.parsedCssColor("#11223344").b > 0.19
+                    && alphaRenderer.parsedCssColor("#11223344").a > 0.26
+                    && alphaRenderer.parsedCssColor("#11223344").a < 0.28,
+                "CSS alpha-last hex channels were interpreted as Qt ARGB")
+            window.expect(alphaRenderer.isPureCssColor("#123456")
+                    && alphaRenderer.isPureCssColor("rgb(1, 2, 3)")
+                    && !alphaRenderer.isPureCssColor("url(https://tracker.invalid/bg)" )
+                    && !alphaRenderer.isPureCssColor("linear-gradient(red, blue)"),
+                "solid-background shorthand accepted a resource or gradient")
             window.expect(renderer.parsedCssColor("inherit") === null
                     && renderer.parsedCssColor("initial") === null,
                 "non-color CSS keywords were accepted as viewport colors")

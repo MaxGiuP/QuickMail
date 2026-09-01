@@ -27,6 +27,7 @@ Item {
         property bool delayThread: false
         property bool delayActions: false
         property bool syncFailure: false
+        property int nextActionRevision: 100
         property var threadResult: null
         property var mailDetail: null
         property var delayedMail: []
@@ -102,6 +103,8 @@ Item {
                 pending.push({ params: params, callback: callback })
                 delayedActions = pending
             }
+            else if (method === methods.mailAction)
+                callback({ revision: nextActionRevision++ }, null)
             else if (method === methods.draftSave)
                 callback({ draft: { draftId: "draft-returned" }, revision: 2 }, null)
             else if (method === methods.draftList)
@@ -153,6 +156,7 @@ Item {
     MailStore {
         id: store
         rpc: fakeRpc
+        messageDetailPrefetchEnabled: false
     }
 
     HtmlMessageView {
@@ -294,8 +298,11 @@ Item {
                 "reader blocking fixture did not leave thread and action work pending")
             root.expect(fakeRpc.requests.length === readerRequestStart + 3
                 && fakeRpc.requests[readerRequestStart].method === fakeRpc.methods.mailGet
-                && fakeRpc.requests[readerRequestStart + 1].method === fakeRpc.methods.threadGet
-                && fakeRpc.requests[readerRequestStart + 2].method === fakeRpc.methods.mailAction,
+                && fakeRpc.requests.slice(readerRequestStart + 1).some(function(item) {
+                    return item.method === fakeRpc.methods.threadGet
+                }) && fakeRpc.requests.slice(readerRequestStart + 1).some(function(item) {
+                    return item.method === fakeRpc.methods.mailAction
+                }),
                 "cached body was not prioritized ahead of thread and provider work")
             fakeRpc.delayedThreads[0].callback({
                 id: "account-a:cached-thread", messages: [cachedUnread], truncated: false
@@ -303,6 +310,21 @@ Item {
             fakeRpc.delayedActions[0].callback({}, null)
             fakeRpc.delayThread = false
             fakeRpc.delayActions = false
+
+            const mailGetsBeforeReopen = fakeRpc.requests.filter(function(item) {
+                return item.method === fakeRpc.methods.mailGet
+                    && item.params.messageId === cachedUnread.id
+            }).length
+            store.openMessage(cachedUnread)
+            const mailGetsAfterReopen = fakeRpc.requests.filter(function(item) {
+                return item.method === fakeRpc.methods.mailGet
+                    && item.params.messageId === cachedUnread.id
+            }).length
+            root.expect(!store.readerLoading
+                    && store.selectedMessage.bodyText
+                        === "Cached body is immediately available"
+                    && mailGetsAfterReopen === mailGetsBeforeReopen,
+                "reopening a recent message missed the detail LRU or showed a spinner")
 
             const threadFirst = {
                 id: "account-a:message-1", accountId: "account-a",
@@ -504,6 +526,7 @@ Item {
             }
             fakeRpc.requests = []
             fakeRpc.notification(fakeRpc.events.mail, { revision: 10 })
+            store.flushMailRevisions()
             root.expect(store.unreadCount === 9,
                 "mail.changed did not refresh dashboard unread state")
             root.expect(fakeRpc.requests.some(function(item) {
@@ -515,6 +538,14 @@ Item {
             }) && fakeRpc.requests.some(function(item) {
                 return item.method === fakeRpc.methods.mailList
             }), "mail.changed did not refresh snapshot, accounts, and active mail")
+
+            fakeRpc.requests = []
+            store.rememberOwnedMailRevision(12)
+            fakeRpc.notification(fakeRpc.events.mail, { revision: 12 })
+            store.flushMailRevisions()
+            root.expect(fakeRpc.requests.length === 1
+                    && fakeRpc.requests[0].method === fakeRpc.methods.snapshot,
+                "an optimistically applied mail revision rebuilt the message list")
 
             fakeRpc.snapshotResult = {
                 accounts: fakeRpc.snapshotResult.accounts,

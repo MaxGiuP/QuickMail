@@ -1,8 +1,9 @@
-use std::{fmt, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
+use tokio::sync::Mutex;
 use zbus::fdo::ObjectManagerProxy;
 
 /// Secret text which is always redacted from debug output.
@@ -416,19 +417,43 @@ fn validate_mail_capabilities(
 #[derive(Clone)]
 pub(crate) struct GoaTokenSource {
     object_path: String,
+    cached: Arc<Mutex<Option<CachedAccessToken>>>,
+}
+
+struct CachedAccessToken {
+    token: AccessToken,
+    cached_at: DateTime<Utc>,
 }
 
 impl GoaTokenSource {
     pub(crate) fn new(account: &GoaMailAccount) -> Self {
         Self {
             object_path: account.object_path.clone(),
+            cached: Arc::new(Mutex::new(None)),
         }
     }
 }
 
+fn cached_access_token_is_fresh(cached: &CachedAccessToken, now: DateTime<Utc>) -> bool {
+    cached
+        .token
+        .expires_at
+        .is_some_and(|expires_at| expires_at > now + chrono::Duration::seconds(30))
+        || cached.token.expires_at.is_none()
+            && cached.cached_at > now - chrono::Duration::minutes(1)
+}
+
 #[async_trait]
 impl TokenSource for GoaTokenSource {
-    async fn access_token(&self, _force_refresh: bool) -> Result<AccessToken, TokenError> {
+    async fn access_token(&self, force_refresh: bool) -> Result<AccessToken, TokenError> {
+        let mut cached = self.cached.lock().await;
+        if !force_refresh
+            && let Some(token) = cached
+                .as_ref()
+                .filter(|token| cached_access_token_is_fresh(token, Utc::now()))
+        {
+            return Ok(token.token.clone());
+        }
         let connection = zbus::Connection::session()
             .await
             .map_err(|_| TokenError::StoreUnavailable)?;
@@ -467,11 +492,16 @@ impl TokenSource for GoaTokenSource {
                 .await
                 .map_err(|_| TokenError::StoreUnavailable)?
                 .map_err(|_| TokenError::AuthorizationRequired)?;
-        Ok(AccessToken {
+        let token = AccessToken {
             value: SecretString::new(token),
             expires_at: (expires_in > 0)
                 .then(|| Utc::now() + chrono::Duration::seconds(i64::from(expires_in))),
-        })
+        };
+        *cached = Some(CachedAccessToken {
+            token: token.clone(),
+            cached_at: Utc::now(),
+        });
+        Ok(token)
     }
 }
 
@@ -494,6 +524,34 @@ fn split_host_port(host: &str, default_port: u16) -> Result<(String, u16), Token
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goa_access_token_cache_keeps_fresh_tokens_and_expires_unknown_lifetimes() {
+        let now = Utc::now();
+        let token = |expires_at, cached_at| CachedAccessToken {
+            token: AccessToken {
+                value: SecretString::new("secret"),
+                expires_at,
+            },
+            cached_at,
+        };
+        assert!(cached_access_token_is_fresh(
+            &token(Some(now + chrono::Duration::minutes(5)), now),
+            now
+        ));
+        assert!(!cached_access_token_is_fresh(
+            &token(Some(now + chrono::Duration::seconds(10)), now),
+            now
+        ));
+        assert!(cached_access_token_is_fresh(
+            &token(None, now - chrono::Duration::seconds(30)),
+            now
+        ));
+        assert!(!cached_access_token_is_fresh(
+            &token(None, now - chrono::Duration::minutes(2)),
+            now
+        ));
+    }
 
     #[test]
     fn debug_output_redacts_every_secret() {

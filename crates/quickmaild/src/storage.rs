@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_THREAD_MESSAGES: usize = 100;
 
@@ -2149,10 +2149,10 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                message_json TEXT NOT NULL, updated_at INTEGER NOT NULL
              );
              CREATE INDEX idx_drafts_account_updated ON drafts(account_id, updated_at DESC, id);
-             PRAGMA user_version=7;
+             PRAGMA user_version=8;
              COMMIT;",
         )?;
-        version = 7;
+        version = 8;
     }
     if version == 1 {
         connection.execute_batch(
@@ -2250,6 +2250,21 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
         } else {
             connection.pragma_update(None, "user_version", 7)?;
         }
+        version = 7;
+    }
+    if version == 7 {
+        // The colour sanitizer now retains safe solid background shorthand
+        // and stylesheet comments. Older sanitized HTML has already lost that
+        // presentation information, so refetch it lazily while preserving the
+        // existing payload as an offline fallback.
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE messages
+                SET body_loaded=0
+              WHERE body_html IS NOT NULL;
+             PRAGMA user_version=8;
+             COMMIT;",
+        )?;
     }
     Ok(())
 }
@@ -2915,6 +2930,31 @@ mod tests {
             .unwrap();
         assert!(body_loaded);
         assert_eq!(still_cached.body_text, plain.body_text);
+    }
+
+    #[test]
+    fn schema_seven_migration_refreshes_html_for_the_colour_policy() {
+        let mut repository = Repository::open_in_memory().unwrap();
+        repository.upsert_account(&account()).unwrap();
+        let mut html = message(43);
+        html.body_html = Some("<div style=\"color:#202124\">cached mail</div>".into());
+        repository
+            .upsert_messages(std::slice::from_ref(&html))
+            .unwrap();
+        repository
+            .connection
+            .pragma_update(None, "user_version", 7)
+            .unwrap();
+
+        migrate(&repository.connection).unwrap();
+
+        let (preserved, body_loaded) = repository
+            .get_cached_message("account-1:message-00043")
+            .unwrap()
+            .unwrap();
+        assert_eq!(repository.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(!body_loaded);
+        assert_eq!(preserved.body_html, html.body_html);
     }
 
     #[tokio::test]

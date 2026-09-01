@@ -58,6 +58,7 @@ const AVATAR_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const MAX_CONCURRENT_AVATAR_FETCHES: usize = 4;
 
 const SAFE_CSS_PROPERTIES: &[&str] = &[
+    "background",
     "background-color",
     "border",
     "border-bottom",
@@ -910,7 +911,10 @@ impl Daemon {
                     .await
                     .map_err(storage_rpc_error)?;
                 if let Some((message, true)) = cached.as_mut() {
-                    sanitize_message_html(message);
+                    // Loaded bodies entered this cache only after the current
+                    // schema's sanitizer pass. Sanitizer policy changes mark
+                    // HTML rows stale during migration, so the hot path can
+                    // return trusted cache data without reparsing it.
                     return encode(message);
                 }
                 let refreshed = match self.provider_for_message(&params.message_id).await {
@@ -2538,9 +2542,12 @@ fn sanitize_stylesheet_blocks(html: &str) -> String {
 }
 
 fn sanitize_stylesheet(input: &str) -> String {
-    if input.len() > MAX_SAFE_STYLESHEET_BYTES || input.contains("/*") || input.contains("*/") {
+    if input.len() > MAX_SAFE_STYLESHEET_BYTES {
         return String::new();
     }
+    let Some(input) = strip_css_comments(input) else {
+        return String::new();
+    };
     let mut output = String::new();
     let mut cursor = 0;
     for _ in 0..2048 {
@@ -2548,11 +2555,14 @@ fn sanitize_stylesheet(input: &str) -> String {
             break;
         };
         let open = cursor + open_offset;
-        let Some(close_offset) = input[open + 1..].find('}') else {
+        let Some(close) = matching_css_brace(&input, open) else {
             break;
         };
-        let close = open + 1 + close_offset;
         let selector = normalize_email_selector(input[cursor..open].trim());
+        if selector.trim_start().starts_with('@') {
+            cursor = close + 1;
+            continue;
+        }
         let declarations = &input[open + 1..close];
         let sanitized = sanitize_css_declarations(declarations);
         if safe_css_selector(&selector) && !sanitized.is_empty() {
@@ -2573,6 +2583,53 @@ fn sanitize_stylesheet(input: &str) -> String {
     output
 }
 
+fn strip_css_comments(input: &str) -> Option<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(start_offset) = input[cursor..].find("/*") {
+        let start = cursor + start_offset;
+        output.push_str(&input[cursor..start]);
+        let close = input[start + 2..].find("*/")? + start + 2;
+        output.push(' ');
+        cursor = close + 2;
+    }
+    output.push_str(&input[cursor..]);
+    (!output.contains("*/")).then_some(output)
+}
+
+fn matching_css_brace(input: &str, open: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut cursor = open;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if let Some(active_quote) = quote {
+            if byte == b'\\' {
+                cursor = cursor.saturating_add(2);
+                continue;
+            }
+            if byte == active_quote {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'{' => depth = depth.saturating_add(1),
+                b'}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                }
+                _ => {}
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
 fn normalize_email_selector(selector: &str) -> String {
     let mut output = String::with_capacity(selector.len() + 16);
     let bytes = selector.as_bytes();
@@ -2581,8 +2638,8 @@ fn normalize_email_selector(selector: &str) -> String {
         if cursor + 4 <= bytes.len()
             && bytes[cursor..cursor + 4].eq_ignore_ascii_case(b"body")
             && (cursor == 0
-                || !(bytes[cursor - 1].is_ascii_alphanumeric()
-                    || matches!(bytes[cursor - 1], b'_' | b'-')))
+                || bytes[cursor - 1].is_ascii_whitespace()
+                || matches!(bytes[cursor - 1], b',' | b'>' | b'+' | b'~'))
             && (cursor + 4 == bytes.len()
                 || !(bytes[cursor + 4].is_ascii_alphanumeric()
                     || matches!(bytes[cursor + 4], b'_' | b'-')))
@@ -2604,8 +2661,14 @@ fn sanitize_css_declarations(input: &str) -> String {
         let Some((property, value)) = declaration.split_once(':') else {
             continue;
         };
-        let property = property.trim().to_ascii_lowercase();
+        let mut property = property.trim().to_ascii_lowercase();
         let value = value.trim();
+        if property == "background" {
+            if !is_pure_css_color(value) {
+                continue;
+            }
+            property = "background-color".into();
+        }
         if !SAFE_CSS_PROPERTIES.contains(&property.as_str())
             || !safe_css_property_value(&property, value)
         {
@@ -2614,6 +2677,42 @@ fn sanitize_css_declarations(input: &str) -> String {
         kept.push(format!("{property}:{value}"));
     }
     kept.join(";")
+}
+
+fn is_pure_css_color(value: &str) -> bool {
+    let value = value.trim();
+    let lowercase = value.to_ascii_lowercase();
+    let color = lowercase
+        .strip_suffix("important")
+        .and_then(|prefix| prefix.trim_end().strip_suffix('!'))
+        .map(str::trim_end)
+        .unwrap_or(&lowercase);
+    if let Some(hex) = color.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8)
+            && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    if !color.is_empty()
+        && color.len() <= 32
+        && color
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+    {
+        return true;
+    }
+    ["rgb", "rgba", "hsl", "hsla"].iter().any(|function| {
+        color
+            .strip_prefix(function)
+            .and_then(|arguments| arguments.strip_prefix('('))
+            .and_then(|arguments| arguments.strip_suffix(')'))
+            .is_some_and(|arguments| {
+                !arguments.is_empty()
+                    && arguments.bytes().all(|byte| {
+                        byte.is_ascii_digit()
+                            || byte.is_ascii_whitespace()
+                            || matches!(byte, b'+' | b'-' | b'.' | b',' | b'%' | b'/')
+                    })
+            })
+    })
 }
 
 fn safe_css_property_value(property: &str, value: &str) -> bool {
@@ -4480,6 +4579,55 @@ mod tests {
             "700furlongs",
         ] {
             assert!(!safe_css_dimension(rejected), "accepted {rejected}");
+        }
+    }
+
+    #[test]
+    fn solid_backgrounds_and_light_styles_survive_without_leaking_dark_media_rules() {
+        let cleaned = sanitize_html_body(
+            r#"<style>
+                /* sender reset */
+                .body { color:#111111 }
+                body { background:#f4f1ea; color:#202124 }
+                .rgb { background:rgb(1, 2, 3) }
+                .unsafe { background:url(https://tracker.invalid/image.png) #fff }
+                @media (prefers-color-scheme: dark) {
+                    body { background:#000; color:#fff }
+                    .inside { color:#eeeeee }
+                }
+                .after { color:#222222 }
+            </style><body>mail</body>"#,
+        );
+
+        assert!(cleaned.contains(".body{color:#111111}"));
+        assert!(cleaned.contains(".quickmail-body{background-color:#f4f1ea;color:#202124}"));
+        assert!(cleaned.contains(".rgb{background-color:rgb(1, 2, 3)}"));
+        assert!(cleaned.contains(".after{color:#222222}"));
+        assert!(!cleaned.contains("..quickmail-body"));
+        assert!(!cleaned.contains("tracker.invalid"));
+        assert!(!cleaned.contains(".inside"));
+        assert!(!cleaned.contains("background-color:#000"));
+    }
+
+    #[test]
+    fn background_shorthand_accepts_only_a_single_solid_color() {
+        for allowed in [
+            "#fff",
+            "#11223344 !important",
+            "white",
+            "transparent",
+            "rgb(1, 2, 3)",
+            "hsl(210, 50%, 40%)",
+        ] {
+            assert!(is_pure_css_color(allowed), "rejected {allowed}");
+        }
+        for rejected in [
+            "url(https://example.invalid/a.png)",
+            "linear-gradient(red, blue)",
+            "#fff url(https://example.invalid/a.png)",
+            "var(--sender-background)",
+        ] {
+            assert!(!is_pure_css_color(rejected), "accepted {rejected}");
         }
     }
 

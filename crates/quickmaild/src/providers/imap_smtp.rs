@@ -188,6 +188,14 @@ pub(crate) struct ImapEnvelope {
     pub(crate) references: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ImapFetchedMessage {
+    pub(crate) uid: u64,
+    pub(crate) uid_validity: u64,
+    pub(crate) flags: BTreeSet<String>,
+    pub(crate) raw: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IncrementalUidPage {
     pub(crate) uids: Vec<u64>,
@@ -236,8 +244,15 @@ pub(crate) trait ImapTransport: Send + Sync {
         mailbox: &str,
         uids: &[u64],
     ) -> Result<Vec<ImapEnvelope>, ImapError>;
-    /// Raw bodies are fetched only when the user opens a message.
-    async fn fetch_raw(&self, mailbox: &str, uid: u64) -> Result<Vec<u8>, ImapError>;
+    /// Full bodies are fetched only when the user opens or downloads from a
+    /// message. The UIDVALIDITY check and body read are one atomic operation,
+    /// so a mailbox reset cannot return a different message for a stale UID.
+    async fn fetch_message(
+        &self,
+        mailbox: &str,
+        uid: u64,
+        expected_uid_validity: u64,
+    ) -> Result<ImapFetchedMessage, ImapError>;
     async fn store_flags(
         &self,
         mailbox: &str,
@@ -270,7 +285,10 @@ const IMAP_SUMMARY_FETCH: &str = "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS
 fn bounded_raw_fetch_query(limit: usize) -> String {
     // Request one byte beyond the accepted limit so a missing or dishonest
     // RFC822.SIZE response still cannot make a truncated message look valid.
-    format!("(UID BODY.PEEK[]<0.{}>)", limit.saturating_add(1))
+    format!(
+        "(UID FLAGS RFC822.SIZE BODY.PEEK[]<0.{}>)",
+        limit.saturating_add(1)
+    )
 }
 
 fn validate_raw_message_size(size: usize, limit: usize) -> Result<(), ImapError> {
@@ -318,6 +336,7 @@ pub(crate) struct AsyncImapTransport {
     config: ImapSmtpConfig,
     tls: TlsConnector,
     session: Mutex<Option<ImapSession>>,
+    detail_session: Mutex<Option<ImapSession>>,
     idle_session: Mutex<Option<ImapSession>>,
 }
 
@@ -343,6 +362,7 @@ impl AsyncImapTransport {
             config,
             tls: TlsConnector::from(Arc::new(client_config)),
             session: Mutex::new(None),
+            detail_session: Mutex::new(None),
             idle_session: Mutex::new(None),
         })
     }
@@ -426,18 +446,20 @@ impl AsyncImapTransport {
         }
     }
 
-    async fn lock_session(
+    async fn lock_session<'a>(
         &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<ImapSession>>, ImapError> {
-        let mut guard = self.session.lock().await;
+        lane: &'a Mutex<Option<ImapSession>>,
+    ) -> Result<tokio::sync::MutexGuard<'a, Option<ImapSession>>, ImapError> {
+        let mut guard = lane.lock().await;
         if guard.is_none() {
             *guard = Some(bounded_imap(IMAP_COMMAND_TIMEOUT, self.connect()).await?);
         }
         Ok(guard)
     }
 
-    async fn run_session_operation<T, F>(
+    async fn run_session_operation_on<T, F>(
         &self,
+        lane: &Mutex<Option<ImapSession>>,
         retry_safe: bool,
         mut operation: F,
     ) -> Result<T, ImapError>
@@ -448,7 +470,7 @@ impl AsyncImapTransport {
     {
         let mut already_retried = false;
         loop {
-            let mut guard = match self.lock_session().await {
+            let mut guard = match self.lock_session(lane).await {
                 Ok(guard) => guard,
                 Err(error) => match session_error_action(&error, retry_safe, already_retried) {
                     SessionErrorAction::InvalidateAndRetry => {
@@ -476,6 +498,20 @@ impl AsyncImapTransport {
                 }
             }
         }
+    }
+
+    async fn run_session_operation<T, F>(
+        &self,
+        retry_safe: bool,
+        operation: F,
+    ) -> Result<T, ImapError>
+    where
+        F: for<'session> FnMut(
+            &'session mut ImapSession,
+        ) -> BoxFuture<'session, Result<T, ImapError>>,
+    {
+        self.run_session_operation_on(&self.session, retry_safe, operation)
+            .await
     }
 }
 
@@ -554,7 +590,7 @@ impl ImapTransport for AsyncImapTransport {
         mailboxes.sort_by_key(|mailbox| mailbox.role != Some(MailboxRole::Inbox));
         let mut already_retried = false;
         loop {
-            let mut guard = match self.lock_session().await {
+            let mut guard = match self.lock_session(&self.session).await {
                 Ok(guard) => guard,
                 Err(error) => match session_error_action(&error, true, already_retried) {
                     SessionErrorAction::InvalidateAndRetry => {
@@ -815,30 +851,21 @@ impl ImapTransport for AsyncImapTransport {
         Ok(envelopes)
     }
 
-    async fn fetch_raw(&self, mailbox: &str, uid: u64) -> Result<Vec<u8>, ImapError> {
+    async fn fetch_message(
+        &self,
+        mailbox: &str,
+        uid: u64,
+        expected_uid_validity: u64,
+    ) -> Result<ImapFetchedMessage, ImapError> {
         let mailbox = mailbox.to_owned();
-        self.run_session_operation(true, move |session| {
+        self.run_session_operation_on(&self.detail_session, true, move |session| {
             let mailbox = mailbox.clone();
             Box::pin(async move {
                 tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-                    select_mailbox(session, &mailbox).await?;
-                    let declared_size = {
-                        let mut fetches = session
-                            .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
-                            .await
-                            .map_err(imap_protocol_error)?;
-                        let fetch = fetches
-                            .try_next()
-                            .await
-                            .map_err(imap_protocol_error)?
-                            .ok_or(ImapError::NotFound)?;
-                        fetch
-                            .size
-                            .map(|size| size as usize)
-                            .ok_or(ImapError::MissingMessageSize)?
-                    };
-                    validate_raw_message_size(declared_size, MAX_MAIL_MESSAGE_BYTES)?;
-
+                    let selected = select_mailbox(session, &mailbox).await?;
+                    if selected.uid_validity != expected_uid_validity {
+                        return Err(ImapError::NotFound);
+                    }
                     let query = bounded_raw_fetch_query(MAX_MAIL_MESSAGE_BYTES);
                     let mut fetches = session
                         .uid_fetch(uid.to_string(), query)
@@ -849,12 +876,26 @@ impl ImapTransport for AsyncImapTransport {
                         .await
                         .map_err(imap_protocol_error)?
                         .ok_or(ImapError::NotFound)?;
+                    if fetch.uid.map(u64::from) != Some(uid) {
+                        return Err(ImapError::NotFound);
+                    }
+                    let declared_size = fetch
+                        .size
+                        .map(|size| size as usize)
+                        .ok_or(ImapError::MissingMessageSize)?;
+                    validate_raw_message_size(declared_size, MAX_MAIL_MESSAGE_BYTES)?;
+                    let flags = fetch.flags().map(flag_string).collect::<BTreeSet<_>>();
                     let raw = fetch
                         .body()
                         .map(ToOwned::to_owned)
                         .ok_or(ImapError::NotFound)?;
                     validate_raw_message_size(raw.len(), MAX_MAIL_MESSAGE_BYTES)?;
-                    Ok(raw)
+                    Ok(ImapFetchedMessage {
+                        uid,
+                        uid_validity: selected.uid_validity,
+                        flags,
+                        raw,
+                    })
                 })
                 .await
                 .map_err(|_| ImapError::CommandTimeout)?
@@ -1931,36 +1972,15 @@ where
     async fn get_message(&self, id: &str) -> Result<Message, ProviderError> {
         let native_id = provider_native_id(&self.account.id, id)?;
         let parsed_id = StableImapId::parse(native_id).map_err(provider_error)?;
-        let selected = self
+        let fetched = self
             .imap
-            .select(&parsed_id.mailbox)
+            .fetch_message(&parsed_id.mailbox, parsed_id.uid, parsed_id.uid_validity)
             .await
             .map_err(provider_error)?;
-        if selected.uid_validity != parsed_id.uid_validity {
+        if fetched.uid != parsed_id.uid || fetched.uid_validity != parsed_id.uid_validity {
             return Err(ProviderError::NotFound);
         }
-        let envelope = self
-            .imap
-            .fetch_envelopes(&parsed_id.mailbox, &[parsed_id.uid])
-            .await
-            .map_err(provider_error)?
-            .into_iter()
-            .find(|envelope| envelope.uid == parsed_id.uid)
-            .ok_or(ProviderError::NotFound)?;
-        let raw = self
-            .imap
-            .fetch_raw(&parsed_id.mailbox, parsed_id.uid)
-            .await
-            .map_err(provider_error)?;
-        let confirmed = self
-            .imap
-            .select(&parsed_id.mailbox)
-            .await
-            .map_err(provider_error)?;
-        if confirmed.uid_validity != parsed_id.uid_validity {
-            return Err(ProviderError::NotFound);
-        }
-        let parsed = self.mime.parse(&raw).map_err(mime_provider_error)?;
+        let parsed = self.mime.parse(&fetched.raw).map_err(mime_provider_error)?;
         let thread_id = imap_thread_id(
             &self.account.id,
             parsed.message_id.as_deref(),
@@ -1982,8 +2002,8 @@ where
                 subject: parsed.subject,
                 author: parsed.from,
                 timestamp: parsed.date.unwrap_or_else(Utc::now),
-                read: envelope.flags.contains("\\Seen"),
-                starred: envelope.flags.contains("\\Flagged"),
+                read: fetched.flags.contains("\\Seen"),
+                starred: fetched.flags.contains("\\Flagged"),
                 snippet: parsed
                     .text_body
                     .as_deref()
@@ -1992,7 +2012,7 @@ where
                     .take(180)
                     .collect(),
                 has_attachments: !parsed.attachments.is_empty(),
-                labels: envelope
+                labels: fetched
                     .flags
                     .into_iter()
                     .filter(|flag| !flag.starts_with('\\'))
@@ -2160,20 +2180,12 @@ where
         let index = attachment_id
             .parse::<usize>()
             .map_err(|_| ProviderError::NotFound)?;
-        let selected = self
+        let fetched = self
             .imap
-            .select(&parsed_id.mailbox)
+            .fetch_message(&parsed_id.mailbox, parsed_id.uid, parsed_id.uid_validity)
             .await
             .map_err(provider_error)?;
-        if selected.uid_validity != parsed_id.uid_validity {
-            return Err(ProviderError::NotFound);
-        }
-        let raw = self
-            .imap
-            .fetch_raw(&parsed_id.mailbox, parsed_id.uid)
-            .await
-            .map_err(provider_error)?;
-        let parsed = self.mime.parse(&raw).map_err(mime_provider_error)?;
+        let parsed = self.mime.parse(&fetched.raw).map_err(mime_provider_error)?;
         let attachment = parsed
             .attachments
             .into_iter()
@@ -2956,7 +2968,10 @@ mod tests {
         let query = bounded_raw_fetch_query(MAX_MAIL_MESSAGE_BYTES);
         assert_eq!(
             query,
-            format!("(UID BODY.PEEK[]<0.{}>)", MAX_MAIL_MESSAGE_BYTES + 1)
+            format!(
+                "(UID FLAGS RFC822.SIZE BODY.PEEK[]<0.{}>)",
+                MAX_MAIL_MESSAGE_BYTES + 1
+            )
         );
         assert!(!query.contains("BODY.PEEK[])"));
         assert!(validate_raw_message_size(MAX_MAIL_MESSAGE_BYTES, MAX_MAIL_MESSAGE_BYTES).is_ok());
