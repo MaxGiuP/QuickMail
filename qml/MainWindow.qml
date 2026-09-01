@@ -139,11 +139,13 @@ Item {
         spacing: 0
 
         StatusBanner {
+            objectName: "mailStatusBanner"
             Layout.fillWidth: true
             kind: store.errorText !== "" ? "error" : store.offline ? "offline" : "syncing"
             message: store.errorText !== "" ? store.errorText
-                : store.offline ? "Offline — reconnecting to the QuickMail service"
-                : store.syncing ? "Checking for new mail…" : ""
+                : store.offline ? AgendaTranslations.tr(
+                    "Offline — reconnecting to the QuickMail service")
+                : store.syncing ? AgendaTranslations.tr("Checking for new mail…") : ""
             onDismissed: store.errorText = ""
         }
 

@@ -25,6 +25,20 @@ ApplicationWindow {
         Qt.exit(1)
     }
 
+    function descendantsWithName(object, name, result) {
+        if (!object) return
+        if (object.objectName === name) result.push(object)
+        const children = object.children || []
+        for (let index = 0; index < children.length; ++index)
+            descendantsWithName(children[index], name, result)
+    }
+
+    function named(object, name) {
+        const result = []
+        descendantsWithName(object, name, result)
+        return result.length > 0 ? result[0] : null
+    }
+
     QtObject {
         id: fakeStore
         property var accounts: window.accountFixture
@@ -210,6 +224,66 @@ ApplicationWindow {
         anchors.fill: parent
         store: fakeStore
         onWindowCloseReady: ++window.windowCloseReadyCount
+    }
+
+    Timer {
+        id: statusSetup
+        interval: 10
+        running: true
+        repeat: false
+        onTriggered: {
+            AgendaTranslations.localeOverride = "de_DE"
+            fakeStore.syncing = true
+            statusGermanCheck.start()
+        }
+    }
+
+    Timer {
+        id: statusGermanCheck
+        interval: 20
+        repeat: false
+        onTriggered: {
+            const banner = window.named(mainWindow, "mailStatusBanner")
+            const message = window.named(banner, "statusBannerMessage")
+            const dismissButton = window.named(banner,
+                "statusBannerDismissButton")
+            window.expect(banner !== null && banner.visible,
+                "mail synchronization status banner was not displayed")
+            window.expect(banner.color === Theme.surfaceRaised
+                    && banner.border.color === Theme.borderSoft,
+                "mail synchronization status did not use system surface colours")
+            window.expect(message !== null
+                    && message.text === "Es wird nach neuen E-Mails gesucht…",
+                "German mail synchronization status was not rendered")
+            window.expect(dismissButton !== null
+                    && dismissButton.tip === "Schließen",
+                "German status dismissal tooltip was not translated")
+            AgendaTranslations.localeOverride = "it_IT"
+            fakeStore.offline = true
+            statusItalianCheck.start()
+        }
+    }
+
+    Timer {
+        id: statusItalianCheck
+        interval: 20
+        repeat: false
+        onTriggered: {
+            const banner = window.named(mainWindow, "mailStatusBanner")
+            const message = window.named(banner, "statusBannerMessage")
+            const dismissButton = window.named(banner,
+                "statusBannerDismissButton")
+            window.expect(banner !== null && banner.kind === "offline"
+                    && message !== null
+                    && message.text === "Offline — riconnessione al servizio QuickMail",
+                "Italian offline status or status precedence was not rendered")
+            window.expect(dismissButton !== null
+                    && dismissButton.tip === "Chiudi",
+                "Italian status dismissal tooltip was not translated")
+            fakeStore.syncing = false
+            fakeStore.offline = false
+            AgendaTranslations.localeOverride = ""
+        }
     }
 
     Timer {

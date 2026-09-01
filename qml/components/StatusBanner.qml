@@ -4,6 +4,7 @@ import ".."
 
 Rectangle {
     id: root
+    objectName: "statusBanner"
     property string kind: "offline" // offline | error | syncing
     property string message: ""
     signal dismissed()
@@ -11,11 +12,11 @@ Rectangle {
     visible: message !== ""
     implicitHeight: visible ? 40 : 0
     color: kind === "error" ? Qt.rgba(1, 0.25, 0.3, 0.14)
-        : kind === "syncing" ? Qt.rgba(0.4, 0.67, 0.94, 0.12)
+        : kind === "syncing" ? Theme.surfaceRaised
         : Qt.rgba(0.94, 0.74, 0.42, 0.13)
     border.width: 1
     border.color: kind === "error" ? Qt.rgba(1, 0.44, 0.47, 0.4)
-        : kind === "syncing" ? Qt.rgba(0.4, 0.67, 0.94, 0.35)
+        : kind === "syncing" ? Theme.borderSoft
         : Qt.rgba(0.94, 0.74, 0.42, 0.35)
 
     RowLayout {
@@ -24,6 +25,7 @@ Rectangle {
         anchors.rightMargin: 8
         spacing: 10
         Text {
+            objectName: "statusBannerIcon"
             text: Theme.icon(root.kind === "error" ? "error"
                 : root.kind === "offline" ? "offline" : "refresh")
             color: root.kind === "error" ? Theme.danger
@@ -32,6 +34,7 @@ Rectangle {
             font.pixelSize: 18
         }
         Text {
+            objectName: "statusBannerMessage"
             Layout.fillWidth: true
             text: root.message
             textFormat: Text.PlainText
@@ -41,9 +44,10 @@ Rectangle {
             elide: Text.ElideRight
         }
         IconButton {
+            objectName: "statusBannerDismissButton"
             visible: root.kind === "error"
             iconName: "close"
-            tip: "Dismiss"
+            tip: AgendaTranslations.tr("Close")
             implicitWidth: 32
             implicitHeight: 32
             onClicked: root.dismissed()
