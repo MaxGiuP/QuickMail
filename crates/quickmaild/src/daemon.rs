@@ -2304,14 +2304,15 @@ mod tests {
         let socket = private_socket_path(directory.path(), "stale.sock");
         let stale = StdUnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let stale_inode = std::fs::symlink_metadata(&socket).unwrap().ino();
         drop(stale);
 
         let bound = bind_user_socket(&socket).unwrap();
-        assert_ne!(
-            std::fs::symlink_metadata(&socket).unwrap().ino(),
-            stale_inode
-        );
+        // A filesystem may immediately reuse the unlinked socket's inode, so
+        // inode inequality is not evidence of successful stale recovery. A
+        // connection to the newly returned listener is the portable check.
+        let metadata = std::fs::symlink_metadata(&socket).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         StdUnixStream::connect(&socket).unwrap();
         drop(bound);
         assert!(!socket.exists());
