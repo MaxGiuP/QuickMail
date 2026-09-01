@@ -7,7 +7,7 @@ ApplicationWindow {
     id: window
 
     visible: true
-    width: 980
+    width: 420
     height: 720
     color: Theme.canvas
     property int backRequests: 0
@@ -17,6 +17,17 @@ ApplicationWindow {
         if (condition) return
         console.error("CALENDAR PANE TEST FAILED: " + message)
         Qt.exit(1)
+    }
+
+    function findNamed(item, name) {
+        if (!item) return null
+        if (item.objectName === name) return item
+        const itemChildren = item.children || []
+        for (let index = 0; index < itemChildren.length; ++index) {
+            const match = findNamed(itemChildren[index], name)
+            if (match) return match
+        }
+        return null
     }
 
     QtObject {
@@ -119,6 +130,20 @@ ApplicationWindow {
                     && calendarPane.calendarDayCellHeight > 0
                     && calendarPane.calendarDayCellHeight <= 36,
                 "calendar cells were not rendered with restrained fixed geometry")
+            window.expect(calendarPane.stackActionButtons,
+                "narrow calendar did not stack its bottom actions")
+            const addEventButton = window.findNamed(
+                calendarPane, "calendarAddEventButton")
+            const addTaskButton = window.findNamed(
+                calendarPane, "calendarAddTaskButton")
+            window.expect(addEventButton !== null && addTaskButton !== null,
+                "calendar action buttons were not rendered")
+            if (addEventButton && addTaskButton) {
+                const eventPosition = addEventButton.mapToItem(calendarPane, 0, 0)
+                const taskPosition = addTaskButton.mapToItem(calendarPane, 0, 0)
+                window.expect(eventPosition.y + addEventButton.height <= taskPosition.y,
+                    "narrow calendar action buttons overlap")
+            }
             for (let dayIndex = 0; dayIndex < calendarPane.monthDays.length; ++dayIndex) {
                 window.expect(calendarPane.monthDays[dayIndex].getDay()
                         === (dayIndex + 1) % 7,

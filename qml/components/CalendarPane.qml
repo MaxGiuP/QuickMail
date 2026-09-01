@@ -22,6 +22,7 @@ Rectangle {
     signal navigationRequested()
 
     readonly property bool compactLayout: mobile || width < 760
+    readonly property bool stackActionButtons: compactLayout && width < 560
     readonly property date today: root.startOfDay(clock.now)
     readonly property var accountDestinations: root.buildDestinations(
         store && Array.isArray(store.accounts) ? store.accounts : [])
@@ -1009,15 +1010,23 @@ Rectangle {
                         }
                     }
 
-                    RowLayout {
+                    GridLayout {
+                        id: bottomActions
+
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 60
+                        Layout.preferredHeight: root.stackActionButtons ? 96 : 60
                         Layout.leftMargin: Theme.space4
                         Layout.rightMargin: Theme.space4
-                        spacing: 8
+                        columns: root.stackActionButtons ? 1 : 2
+                        rows: root.stackActionButtons ? 2 : 1
+                        columnSpacing: 8
+                        rowSpacing: 8
 
                         PrimaryButton {
+                            objectName: "calendarAddEventButton"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            Layout.preferredHeight: 40
                             text: AgendaTranslations.tr("Add event")
                             iconName: "compose"
                             Accessible.name: text
@@ -1025,7 +1034,10 @@ Rectangle {
                         }
 
                         PrimaryButton {
+                            objectName: "calendarAddTaskButton"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            Layout.preferredHeight: 40
                             text: AgendaTranslations.tr("Add task")
                             iconName: "check"
                             Accessible.name: text
