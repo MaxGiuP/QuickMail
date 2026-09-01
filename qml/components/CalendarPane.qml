@@ -519,15 +519,9 @@ Rectangle {
                 iconName: "refresh"
                 tip: AgendaTranslations.tr("Refresh calendar and tasks")
                 enabled: !(root.store && root.store.agendaLoading === true)
+                spinning: root.store && root.store.agendaLoading === true
                 Accessible.name: tip
                 onClicked: root.refreshAgenda()
-                RotationAnimator on rotation {
-                    running: root.store && root.store.agendaLoading === true
-                    from: 0
-                    to: 360
-                    duration: 900
-                    loops: Animation.Infinite
-                }
             }
 
             PrimaryButton {

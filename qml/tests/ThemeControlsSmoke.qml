@@ -33,6 +33,14 @@ ApplicationWindow {
         valueRole: "value"
     }
 
+    IconButton {
+        id: spinningButton
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        iconName: "refresh"
+        spinning: true
+    }
+
     Timer {
         interval: 40
         running: true
@@ -52,13 +60,17 @@ ApplicationWindow {
 
     Timer {
         id: popupCheck
-        interval: 40
+        interval: 220
         repeat: false
         onTriggered: {
             window.expect(selector.popup.visible,
                 "the styled selector popup did not open")
             window.expect(selector.count === 2,
                 "the styled selector did not retain every option")
+            window.expect(spinningButton.rotation === 0,
+                "the refresh control rotated with its outline")
+            window.expect(spinningButton.iconRotation !== 0,
+                "the refresh glyph did not rotate independently")
             selector.currentIndex = 1
             window.expect(selector.currentValue === "second",
                 "the styled selector did not update its current value")

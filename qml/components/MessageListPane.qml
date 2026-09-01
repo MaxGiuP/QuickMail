@@ -83,14 +83,8 @@ Rectangle {
                 iconName: "refresh"
                 tip: "Sync now (F5)"
                 enabled: !store.syncing
+                spinning: store.syncing
                 onClicked: store.sync()
-                RotationAnimator on rotation {
-                    running: store.syncing
-                    from: 0
-                    to: 360
-                    duration: 900
-                    loops: Animation.Infinite
-                }
             }
             IconButton { iconName: "more"; tip: "More options" }
         }
