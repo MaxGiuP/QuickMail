@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 prefix=${PREFIX:-"$HOME/.local"}
 destdir=${DESTDIR:-}
 skip_build=${QUICKMAIL_SKIP_BUILD:-0}
@@ -48,7 +48,7 @@ if [ "$skip_build" -eq 0 ]; then
         exit 1
     }
 
-    (CDPATH= cd -- "$project_dir" && cargo build --release --locked \
+    (CDPATH='' cd -- "$project_dir" && cargo build --release --locked \
         --package quickmaild --package quickmailctl)
 fi
 

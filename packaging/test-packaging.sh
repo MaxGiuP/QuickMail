@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/quickmail-packaging.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT HUP INT TERM
 
@@ -13,13 +13,15 @@ fail() {
 sh -n \
     "$project_dir/packaging/install.sh" \
     "$project_dir/packaging/quickmail" \
-    "$project_dir/packaging/test-qml.sh"
+    "$project_dir/packaging/test-qml.sh" \
+    "$project_dir/packaging/test-packaging.sh"
 
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck \
         "$project_dir/packaging/install.sh" \
         "$project_dir/packaging/quickmail" \
-        "$project_dir/packaging/test-qml.sh"
+        "$project_dir/packaging/test-qml.sh" \
+        "$project_dir/packaging/test-packaging.sh"
 fi
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
@@ -293,9 +295,9 @@ grep -Fx "MAILTO=$mailto" "$qs_log" >/dev/null \
     || fail "new QML process did not inherit the mailto URI"
 
 if env -u XDG_RUNTIME_DIR \
-    PATH=$command_dir:/usr/bin:/bin \
-    QUICKMAIL_QML_DIR=$qml \
-    QUICKMAIL_TEST_QS_LOG=$test_root/no-runtime.log \
+    PATH="$command_dir":/usr/bin:/bin \
+    QUICKMAIL_QML_DIR="$qml" \
+    QUICKMAIL_TEST_QS_LOG="$test_root"/no-runtime.log \
     "$project_dir/packaging/quickmail" >/dev/null 2>&1; then
     fail "launcher accepted an unset XDG_RUNTIME_DIR"
 fi

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 import_path=${QML_IMPORT_PATH:-/usr/lib/qt6/qml}
 test_config_dir=$(mktemp -d "${TMPDIR:-/tmp}/quickmail-qml-config.XXXXXX")
 test_runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/quickmail-qml-runtime.XXXXXX")
