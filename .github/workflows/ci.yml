@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Lints
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --locked --workspace --all-features
+      - name: Packaging tests
+        run: ./packaging/test-packaging.sh
+      - name: Release build
+        run: cargo build --locked --workspace --release

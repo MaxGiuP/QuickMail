@@ -1,0 +1,41 @@
+[package]
+name = "quickmaild"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+quickmail-core = { path = "../quickmail-core" }
+anyhow.workspace = true
+ammonia.workspace = true
+async-trait.workspace = true
+async-imap = { version = "0.11.3", default-features = false, features = ["runtime-tokio"] }
+base64 = "0.22"
+chrono.workspace = true
+clap.workspace = true
+directories.workspace = true
+futures-util = "0.3"
+keyring = "4.2"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "pool", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
+mail-builder = "0.5.0"
+mail-parser = "0.11.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2", "system-proxy"] }
+rustls = "0.23"
+rustls-native-certs = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls = "0.26"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+zbus = "5.19"
+rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.21"

@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/quickmail-core",
+    "crates/quickmaild",
+    "crates/quickmailctl",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/MaxGiuP/QuickMail"
+rust-version = "1.89"
+
+[workspace.dependencies]
+anyhow = "1.0"
+ammonia = "4.1.4"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+directories = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

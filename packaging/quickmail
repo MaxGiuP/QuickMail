@@ -1,0 +1,184 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+: "${XDG_RUNTIME_DIR:?quickmail: XDG_RUNTIME_DIR is required for a private daemon socket}"
+daemon_socket=$XDG_RUNTIME_DIR/quickmail/daemon.sock
+: "${HOME:?quickmail: HOME is required}"
+state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
+cache_home=${XDG_CACHE_HOME:-"${HOME:?quickmail: HOME is required when XDG_CACHE_HOME is unset}/.cache"}
+daemon_database=$state_home/quickmail/mail.db
+attachment_cache=$cache_home/quickmail/attachments
+
+find_qml_dir() {
+    for candidate in \
+        "${QUICKMAIL_QML_DIR:-}" \
+        "$script_dir/../qml" \
+        "$script_dir/../share/quickmail/qml" \
+        "${XDG_DATA_HOME:-${HOME}/.local/share}/quickmail/qml" \
+        "$HOME/.local/share/quickmail/qml" \
+        "/usr/local/share/quickmail/qml" \
+        "/usr/share/quickmail/qml"
+    do
+        if [ -n "$candidate" ] && [ -f "$candidate/shell.qml" ]; then
+            CDPATH= cd -- "$candidate" && pwd
+            return 0
+        fi
+    done
+    return 1
+}
+
+qml_dir=$(find_qml_dir) || {
+    echo "quickmail: could not find the installed QML application" >&2
+    exit 1
+}
+
+find_ctl() {
+    for candidate in \
+        "$script_dir/quickmailctl" \
+        "$(command -v quickmailctl 2>/dev/null || true)" \
+        "$script_dir/../target/release/quickmailctl" \
+        "$script_dir/../target/debug/quickmailctl"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ctl_bin=$(find_ctl || true)
+
+daemon_healthy() {
+    [ -n "$ctl_bin" ] \
+        && timeout 0.5 "$ctl_bin" --socket "$daemon_socket" --compact ping >/dev/null 2>&1
+}
+
+wait_for_daemon() {
+    attempts=0
+    while [ "$attempts" -lt 40 ]
+    do
+        if daemon_healthy; then
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.05
+    done
+    return 1
+}
+
+ensure_daemon() {
+    if daemon_healthy; then
+        return 0
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl --user start quickmaild.service >/dev/null 2>&1; then
+            if ! wait_for_daemon; then
+                echo "quickmail: systemd started quickmaild, but it is not ready yet" >&2
+            fi
+            # Never race a successfully started/restarting systemd service with
+            # an unmanaged fallback daemon. The UI will continue reconnecting.
+            return 0
+        fi
+
+        service_state=$(systemctl --user is-active quickmaild.service 2>/dev/null || true)
+        case "$service_state" in
+            active|activating|reloading)
+                wait_for_daemon || true
+                return 0
+                ;;
+        esac
+    fi
+
+    daemon_bin=""
+    for candidate in \
+        "$script_dir/quickmaild" \
+        "$(command -v quickmaild 2>/dev/null || true)" \
+        "$script_dir/../target/release/quickmaild" \
+        "$script_dir/../target/debug/quickmaild"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            daemon_bin=$candidate
+            break
+        fi
+    done
+    if [ -n "$daemon_bin" ]; then
+        nohup "$daemon_bin" \
+            --socket "$daemon_socket" \
+            --database "$daemon_database" \
+            --attachment-cache "$attachment_cache" \
+            </dev/null >/dev/null 2>&1 &
+        daemon_pid=$!
+        attempts=0
+        while [ "$attempts" -lt 40 ]
+        do
+            if daemon_healthy; then
+                return 0
+            fi
+            if ! kill -0 "$daemon_pid" 2>/dev/null; then
+                echo "quickmail: quickmaild exited before creating its socket" >&2
+                break
+            fi
+            attempts=$((attempts + 1))
+            sleep 0.05
+        done
+        if ! daemon_healthy; then
+            echo "quickmail: quickmaild did not become ready; the UI will keep reconnecting" >&2
+        fi
+    else
+        echo "quickmail: quickmaild was not found; the UI will keep reconnecting" >&2
+    fi
+}
+
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+
+mailto_uri=""
+open_accounts=0
+case $# in
+    0) ;;
+    1)
+        case "$1" in
+            --accounts) open_accounts=1 ;;
+            [mM][aA][iI][lL][tT][oO]:*) mailto_uri=$1 ;;
+            *)
+                echo "usage: quickmail [--accounts | mailto:address]" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    *)
+        echo "usage: quickmail [--accounts | mailto:address]" >&2
+        exit 2
+        ;;
+esac
+
+command -v qs >/dev/null 2>&1 || {
+    echo "quickmail: Quickshell (qs) is required" >&2
+    exit 1
+}
+
+ensure_daemon
+
+if [ "$open_accounts" -eq 1 ]; then
+    if qs ipc -p "$qml_dir" call quickMail accounts >/dev/null 2>&1; then
+        exit 0
+    fi
+    QUICKMAIL_OPEN_ACCOUNTS=1
+    export QUICKMAIL_OPEN_ACCOUNTS
+elif [ -n "$mailto_uri" ]; then
+    if qs ipc -p "$qml_dir" call quickMail compose "$mailto_uri" >/dev/null 2>&1; then
+        exit 0
+    fi
+    QUICKMAIL_MAILTO_URI=$mailto_uri
+    export QUICKMAIL_MAILTO_URI
+else
+    if qs ipc -p "$qml_dir" call quickMail show >/dev/null 2>&1; then
+        exit 0
+    fi
+fi
+
+exec qs --no-duplicate -p "$qml_dir"

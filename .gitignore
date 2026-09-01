@@ -1,0 +1,18 @@
+/target/
+/.cache/
+/.idea/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+result
+
+# Local credentials and account state
+.env
+.env.*
+!.env.example
+credentials.json
+accounts.json

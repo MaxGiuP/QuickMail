@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=QuickMail
+GenericName=Email Client
+Comment=Fast local-first mail for Hyprland
+Exec=quickmail -- %u
+TryExec=quickmail
+Icon=mail-unread-symbolic
+Terminal=false
+StartupNotify=true
+Categories=Network;Email;
+MimeType=x-scheme-handler/mailto;
+StartupWMClass=org.quickshell
+SingleMainWindow=true
