@@ -26,7 +26,7 @@ find "$project_dir/qml" -name '*.qml' -print0 \
 cp -R "$project_dir/qml/." "$test_runtime_dir/"
 cp "$project_dir/qml/tests/SmokeHarness.qml" "$test_runtime_dir/shell.qml"
 
-for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke SettingsMenuSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke NavigationHierarchySmoke
+for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke ThreadPresentationSmoke SettingsMenuSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke NavigationHierarchySmoke
 do
   smoke_log=$(mktemp "${TMPDIR:-/tmp}/quickmail-qml-smoke.XXXXXX")
   smoke_timezone=${TZ:-UTC}

@@ -349,15 +349,39 @@ Item {
             const threadSent = Object.assign({}, threadSecond, {
                 id: "account-a:sent-message", mailboxId: "sent", snippet: "Sent copy"
             })
+            const threadHidden = Object.assign({}, threadFirst, {
+                id: "account-a:message-0", timestamp: 1788217200000,
+                snippet: "Older member outside the loaded page"
+            })
             fakeRpc.threadResult = {
                 id: "account-a:thread-1",
-                messages: [threadFirst, threadSecond, threadSent], truncated: false
+                messages: [threadHidden, threadFirst, threadSecond, threadSent], truncated: false
             }
             fakeRpc.mailDetail = Object.assign({}, threadSecond, { bodyText: "Second body" })
+            fakeRpc.delayThread = true
+            fakeRpc.delayedThreads = []
             store.openMessage(store.conversations[0])
-            root.expect(store.threadMessages.length === 3
+            root.expect(store.threadMessages.length === 1
+                    && store.selectedMessage.conversationMessageIds.length === 2
+                    && fakeRpc.delayedThreads.length === 1,
+                "delayed thread fixture did not open the cached detail first")
+            fakeRpc.delayedThreads[0].callback(fakeRpc.threadResult, null)
+            fakeRpc.delayThread = false
+            root.expect(store.threadMessages.length === 4
                 && store.activeThreadId === "account-a:thread-1",
                 "thread.get did not populate the chronological conversation")
+            const refreshedIds = store.selectedMessage.conversationMessageIds
+            root.expect(refreshedIds.length === 3
+                    && refreshedIds.indexOf(threadHidden.id) >= 0
+                    && refreshedIds.indexOf(threadFirst.id) >= 0
+                    && refreshedIds.indexOf(threadSecond.id) >= 0
+                    && refreshedIds.indexOf(threadSent.id) < 0,
+                "delayed thread.get did not refresh same-mailbox conversation actions")
+            const cachedThreadSecond = store.cachedMessageDetail(threadSecond)
+            root.expect(cachedThreadSecond
+                    && cachedThreadSecond.conversationMessageIds.length === 3
+                    && cachedThreadSecond.conversationMessageIds.indexOf(threadHidden.id) >= 0,
+                "delayed thread.get left the selected detail cache stale")
             request = null
             for (let i = fakeRpc.requests.length - 1; i >= 0; --i) {
                 if (fakeRpc.requests[i].method === fakeRpc.methods.threadGet) {
@@ -373,11 +397,14 @@ Item {
             root.expect(store.messageId(store.selectedMessage) === "account-a:message-1"
                 && store.selectedMessage.bodyText === "First body",
                 "a different message in the thread could not be opened")
-            root.expect(store.selectedMessage.conversationMessageIds.length === 2,
+            root.expect(store.selectedMessage.conversationMessageIds.length === 3
+                    && store.selectedMessage.conversationMessageIds.indexOf(threadSent.id) < 0,
                 "mail.get mixed cross-mailbox IDs into a conversation action")
             store.toggleStar(store.selectedMessage)
             request = fakeRpc.requests[fakeRpc.requests.length - 1]
-            root.expect(request.params.messageIds.length === 2,
+            root.expect(request.params.messageIds.length === 3
+                    && request.params.messageIds.indexOf(threadHidden.id) >= 0
+                    && request.params.messageIds.indexOf(threadSent.id) < 0,
                 "reader actions did not apply consistently to the conversation")
             let automaticSync = null
             for (let i = 0; i < fakeRpc.requests.length; ++i) {

@@ -92,7 +92,7 @@ QtObject {
             reply: "\ue15e", replyAll: "\ue15f", forward: "\ue154", close: "\ue5cd",
             send: "\ue163", attach: "\ue226", check: "\ue5ca", offline: "\ue2c1",
             error: "\ue000", chevron: "\ue5cc", account: "\ue853", settings: "\ue8b8",
-            calendar: "\ue935"
+            calendar: "\ue935", thread: "\ue0bf"
         }
         return icons[name] || "\ue88e"
     }

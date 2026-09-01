@@ -18,8 +18,12 @@ Rectangle {
     readonly property bool unread: message.unread === true || message.is_read === false || message.read === false
     readonly property bool starred: message.starred === true || message.is_starred === true
     readonly property int conversationCount: Number(message.conversationCount || 1)
+    readonly property bool threaded: conversationCount > 1
+    readonly property string conversationLabel: conversationCount
+        + (conversationCount === 1 ? " message" : " messages")
     readonly property string sender: singleLine(Array.isArray(message.conversationSenders)
-        ? message.conversationSenders.join(", ") : message.from_name || message.sender_name
+        ? conversationSenderLabel(message.conversationSenders)
+        : message.from_name || message.sender_name
         || (message.author && (message.author.name || message.author.address))
         || message.from || message.from_address || "Unknown sender") || "Unknown sender"
     readonly property string senderAddress: singleLine((message.author && message.author.address)
@@ -29,10 +33,31 @@ Rectangle {
     readonly property string timestamp: singleLine(formatTimestamp(message.received_display
         || message.date_display || message.time || message.timestamp || message.received_at || ""))
 
+    Accessible.role: Accessible.ListItem
+    Accessible.selected: selected
+    Accessible.name: (unread ? "Unread, " : "") + sender + ", " + subject
+        + (threaded ? ", conversation thread, at least " + conversationLabel : "")
+    Accessible.description: threaded
+        ? "Conversation thread with at least " + conversationLabel
+        : "Single message"
+    Accessible.onPressAction: root.activated()
+
     function singleLine(value) {
         return String(value === undefined || value === null ? "" : value)
             .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
             .replace(/\s+/g, " ").trim()
+    }
+
+    function conversationSenderLabel(values) {
+        const senders = []
+        const list = Array.isArray(values) ? values : []
+        for (let index = 0; index < list.length; ++index) {
+            const senderName = singleLine(list[index])
+            if (senderName !== "" && senders.indexOf(senderName) < 0)
+                senders.push(senderName)
+        }
+        if (senders.length <= 2) return senders.join(", ")
+        return senders.slice(0, 2).join(", ") + " +" + (senders.length - 2)
     }
 
     function formatTimestamp(value) {
@@ -59,17 +84,49 @@ Rectangle {
         anchors.bottomMargin: 8
         spacing: 10
 
-        SenderAvatar {
-            objectName: "messageRowAvatar"
-            Layout.preferredWidth: 36
-            Layout.preferredHeight: 36
+        Item {
+            objectName: "messageRowAvatarStack"
+            Layout.preferredWidth: 40
+            Layout.preferredHeight: 40
             Layout.alignment: Qt.AlignTop
-            displayName: root.sender
-            address: root.senderAddress
-            avatarResolver: root.avatarResolver
-            allowRemoteContent: AppSettings.effectiveAllowRemoteContent
-            backgroundColor: root.unread ? Theme.accentSoft : Theme.surfaceRaised
-            foregroundColor: root.unread ? Theme.accent : Theme.textSecondary
+
+            Rectangle {
+                visible: root.threaded
+                x: 8
+                y: 0
+                width: 32
+                height: 32
+                radius: 16
+                color: Theme.surfaceRaised
+                border.width: 1
+                border.color: root.unread ? Theme.accent : Theme.border
+            }
+
+            Rectangle {
+                visible: root.threaded
+                x: 4
+                y: 4
+                width: 32
+                height: 32
+                radius: 16
+                color: Theme.surfaceHover
+                border.width: 1
+                border.color: root.unread ? Theme.accent : Theme.border
+            }
+
+            SenderAvatar {
+                objectName: "messageRowAvatar"
+                x: 0
+                y: root.threaded ? 6 : 2
+                width: root.threaded ? 34 : 36
+                height: width
+                displayName: root.sender
+                address: root.senderAddress
+                avatarResolver: root.avatarResolver
+                allowRemoteContent: AppSettings.effectiveAllowRemoteContent
+                backgroundColor: root.unread ? Theme.accentSoft : Theme.surfaceRaised
+                foregroundColor: root.unread ? Theme.accent : Theme.textSecondary
+            }
         }
 
         ColumnLayout {
@@ -104,15 +161,6 @@ Rectangle {
                     clip: true
                 }
                 Text {
-                    visible: root.conversationCount > 1
-                    text: root.conversationCount
-                    textFormat: Text.PlainText
-                    color: root.unread ? Theme.accent : Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 10
-                    font.weight: Font.DemiBold
-                }
-                Text {
                     text: root.timestamp
                     Layout.minimumWidth: 0
                     Layout.maximumWidth: 72
@@ -126,20 +174,65 @@ Rectangle {
                     clip: true
                 }
             }
-            Text {
-                objectName: "messageRowSubject"
+            RowLayout {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
-                text: root.subject
-                textFormat: Text.PlainText
-                color: Theme.text
-                font.family: Theme.fontFamily
-                font.pixelSize: 12
-                font.weight: root.unread ? Font.DemiBold : Font.Normal
-                wrapMode: Text.NoWrap
-                maximumLineCount: 1
-                elide: Text.ElideRight
-                clip: true
+                spacing: 8
+
+                Text {
+                    objectName: "messageRowSubject"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: root.subject
+                    textFormat: Text.PlainText
+                    color: Theme.text
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 12
+                    font.weight: root.unread ? Font.DemiBold : Font.Normal
+                    wrapMode: Text.NoWrap
+                    maximumLineCount: 1
+                    elide: Text.ElideRight
+                    clip: true
+                }
+
+                Rectangle {
+                    id: threadBadge
+                    objectName: "messageRowThreadBadge"
+                    visible: root.threaded
+                    Layout.preferredWidth: threadBadgeContent.implicitWidth + 14
+                    Layout.preferredHeight: 20
+                    radius: 10
+                    color: root.unread ? Theme.accentSoft : Theme.surfaceRaised
+                    border.width: 1
+                    border.color: root.unread ? Theme.accent : Theme.border
+
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: "Conversation thread, " + root.conversationLabel
+
+                    Row {
+                        id: threadBadgeContent
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        Text {
+                            text: Theme.icon("thread")
+                            color: root.unread ? Theme.accent : Theme.textSecondary
+                            font.family: Theme.iconFont
+                            font.pixelSize: 13
+                        }
+
+                        Text {
+                            objectName: "messageRowThreadBadgeText"
+                            text: root.compact ? String(root.conversationCount)
+                                : "THREAD · " + root.conversationCount
+                            textFormat: Text.PlainText
+                            color: root.unread ? Theme.accent : Theme.textSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 10
+                            font.weight: Font.Bold
+                        }
+                    }
+                }
             }
             Text {
                 objectName: "messageRowSnippet"

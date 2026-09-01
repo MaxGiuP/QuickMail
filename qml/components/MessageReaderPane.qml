@@ -41,6 +41,10 @@ Rectangle {
     readonly property string renderedBodyHtml: hasHtmlBody ? htmlLoader.loadedHtml : ""
     readonly property int threadCount: Array.isArray(store.threadMessages)
         ? store.threadMessages.length : 0
+    readonly property int knownThreadCount: Math.max(threadCount,
+        Number(message.conversationCount || 1))
+    readonly property bool hasConversation: knownThreadCount > 1
+    readonly property int threadSenderCount: countThreadSenders()
     readonly property string timestampText: formatTimestamp(message.date_display
         || message.received_display || message.timestamp || message.received_at || "")
 
@@ -107,6 +111,36 @@ Rectangle {
 
     function threadSelected(item) {
         return store.messageId(item) === store.messageId(store.selectedMessage)
+    }
+
+    function threadUnread(item) {
+        return item && (item.unread === true || item.is_read === false || item.read === false)
+    }
+
+    function countThreadSenders() {
+        const senders = []
+        const list = Array.isArray(store.threadMessages) ? store.threadMessages : []
+        for (let index = 0; index < list.length; ++index) {
+            const item = list[index]
+            const identity = senderAddressFor(item).toLowerCase() || threadSender(item).toLowerCase()
+            if (identity !== "" && senders.indexOf(identity) < 0)
+                senders.push(identity)
+        }
+        return senders.length
+    }
+
+    function threadMessageCountLabel() {
+        const count = root.knownThreadCount
+        const suffix = store.threadTruncated ? "+" : ""
+        return count + suffix + (count === 1 ? " message" : " messages")
+    }
+
+    function threadBannerDetail() {
+        if (store.threadLoading && root.threadCount < root.knownThreadCount)
+            return "Loading conversation · " + root.threadMessageCountLabel() + "…"
+        const senders = root.threadSenderCount
+        return "Conversation · " + root.threadMessageCountLabel()
+            + (senders > 1 ? " · " + senders + " senders" : "")
     }
 
     function humanSize(value) {
@@ -298,9 +332,9 @@ Rectangle {
                 spacing: 16
 
                 Text {
+                    objectName: "readerSubject"
                     Layout.fillWidth: true
-                    text: (root.message.subject || "(No subject)")
-                        + (root.threadCount > 1 ? "  (" + root.threadCount + ")" : "")
+                    text: root.message.subject || "(No subject)"
                     textFormat: Text.PlainText
                     color: Theme.text
                     font.family: Theme.fontFamily
@@ -311,28 +345,70 @@ Rectangle {
 
                 ColumnLayout {
                     id: threadSection
+                    objectName: "threadSection"
                     Layout.fillWidth: true
-                    visible: store.threadLoading || root.threadCount > 1
-                    spacing: 4
+                    visible: root.hasConversation
+                    spacing: 8
 
-                    RowLayout {
+                    Rectangle {
+                        id: threadBanner
+                        objectName: "threadConversationBanner"
                         Layout.fillWidth: true
-                        visible: store.threadLoading || root.threadCount > 1
-                        Text {
-                            Layout.fillWidth: true
-                            text: root.threadCount > 1
-                                ? root.threadCount + " messages in this conversation"
-                                : "Loading conversation…"
-                            textFormat: Text.PlainText
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 11
-                        }
-                        BusyIndicator {
-                            visible: store.threadLoading
-                            running: visible
-                            Layout.preferredWidth: 20
-                            Layout.preferredHeight: 20
+                        Layout.preferredHeight: 54
+                        radius: Theme.radius
+                        color: Theme.accentSoft
+                        border.width: 1
+                        border.color: Theme.accent
+
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: "Conversation thread, " + root.threadBannerDetail()
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 12
+                            spacing: 10
+
+                            Text {
+                                text: Theme.icon("thread")
+                                color: Theme.accent
+                                font.family: Theme.iconFont
+                                font.pixelSize: 24
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 0
+
+                                Text {
+                                    text: "Conversation thread"
+                                    textFormat: Text.PlainText
+                                    color: Theme.accentSoftText
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 13
+                                    font.weight: Font.Bold
+                                }
+
+                                Text {
+                                    id: threadBannerText
+                                    objectName: "threadConversationBannerText"
+                                    Layout.fillWidth: true
+                                    text: root.threadBannerDetail()
+                                    textFormat: Text.PlainText
+                                    color: Theme.accentSoftText
+                                    opacity: 0.8
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            BusyIndicator {
+                                visible: store.threadLoading
+                                running: visible
+                                Layout.preferredWidth: 22
+                                Layout.preferredHeight: 22
+                            }
                         }
                     }
 
@@ -343,6 +419,11 @@ Rectangle {
                             objectName: "threadCard"
                             required property var modelData
                             required property int index
+                            readonly property bool selectedMessage: root.threadSelected(modelData)
+                            readonly property bool unreadMessage: root.threadUnread(modelData)
+                            readonly property string positionLabel: (index + 1) + " of "
+                                + (store.threadTruncated ? root.knownThreadCount + "+"
+                                    : root.knownThreadCount)
                             readonly property bool hasFinalLayoutGeometry:
                                 root.threadAvatarLayoutReady
                                 && threadSection.visible
@@ -370,13 +451,23 @@ Rectangle {
                                         + bodyFlick.height + threadCard.height
                             }
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 56
+                            Layout.preferredHeight: 64
                             clip: true
                             radius: Theme.radiusSmall
-                            color: root.threadSelected(modelData)
+                            color: selectedMessage
                                 ? Theme.surfaceSelected : Theme.surfaceRaised
-                            border.width: root.threadSelected(modelData) ? 1 : 0
-                            border.color: Theme.accent
+                            border.width: activeFocus ? 2 : 1
+                            border.color: activeFocus || selectedMessage
+                                ? Theme.accent : Theme.borderSoft
+                            activeFocusOnTab: true
+
+                            Accessible.role: Accessible.ListItem
+                            Accessible.selected: selectedMessage
+                            Accessible.name: "Message " + (index + 1) + " of "
+                                + (store.threadTruncated ? "at least " : "")
+                                + root.knownThreadCount + " from " + root.threadSender(modelData)
+                            Accessible.description: selectedMessage
+                                ? "Current open message" : unreadMessage ? "Unread message" : "Read message"
 
                             Behavior on color {
                                 ColorAnimation { duration: 140 }
@@ -387,6 +478,45 @@ Rectangle {
                                 anchors.leftMargin: 12
                                 anchors.rightMargin: 12
                                 spacing: 10
+
+                                Item {
+                                    Layout.preferredWidth: 18
+                                    Layout.fillHeight: true
+
+                                    Rectangle {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        y: threadCard.index === 0 ? parent.height / 2 : 0
+                                        width: 2
+                                        height: threadCard.index === 0 || threadCard.index === root.threadCount - 1
+                                            ? parent.height / 2 : parent.height
+                                        visible: root.threadCount > 1
+                                        color: Theme.border
+                                    }
+
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: threadCard.selectedMessage ? 12 : 9
+                                        height: width
+                                        radius: width / 2
+                                        color: threadCard.selectedMessage ? Theme.accent : Theme.surfaceRaised
+                                        border.width: 2
+                                        border.color: threadCard.selectedMessage
+                                            ? Theme.accent : Theme.textMuted
+                                    }
+
+                                    Rectangle {
+                                        objectName: "threadCardUnreadMarker"
+                                        visible: threadCard.unreadMessage
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.topMargin: 9
+                                        width: 7
+                                        height: 7
+                                        radius: 4
+                                        color: Theme.accent
+                                    }
+                                }
+
                                 Loader {
                                     objectName: "threadCardAvatarLoader"
                                     Layout.preferredWidth: 30
@@ -416,7 +546,7 @@ Rectangle {
                                         color: Theme.text
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 12
-                                        font.weight: Font.DemiBold
+                                        font.weight: threadCard.unreadMessage ? Font.Bold : Font.DemiBold
                                         wrapMode: Text.NoWrap
                                         maximumLineCount: 1
                                         elide: Text.ElideRight
@@ -437,27 +567,79 @@ Rectangle {
                                         clip: true
                                     }
                                 }
-                                Text {
+                                ColumnLayout {
                                     Layout.minimumWidth: 0
-                                    Layout.maximumWidth: 110
-                                    text: root.singleLine(root.formatTimestamp(
-                                        threadCard.modelData.timestamp
-                                            || threadCard.modelData.received_at || ""))
-                                    textFormat: Text.PlainText
-                                    color: Theme.textMuted
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: 10
-                                    wrapMode: Text.NoWrap
-                                    maximumLineCount: 1
-                                    elide: Text.ElideRight
-                                    clip: true
+                                    Layout.maximumWidth: 112
+                                    spacing: 2
+
+                                    Text {
+                                        Layout.alignment: Qt.AlignRight
+                                        text: root.singleLine(root.formatTimestamp(
+                                            threadCard.modelData.timestamp
+                                                || threadCard.modelData.received_at || ""))
+                                        textFormat: Text.PlainText
+                                        color: Theme.textMuted
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 10
+                                        wrapMode: Text.NoWrap
+                                        maximumLineCount: 1
+                                        elide: Text.ElideRight
+                                        clip: true
+                                    }
+
+                                    Rectangle {
+                                        objectName: "threadCardCurrentMarker"
+                                        visible: threadCard.selectedMessage
+                                        Layout.alignment: Qt.AlignRight
+                                        Layout.preferredWidth: 44
+                                        Layout.preferredHeight: 17
+                                        radius: 8
+                                        color: Theme.accent
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "OPEN"
+                                            textFormat: Text.PlainText
+                                            color: Theme.accentText
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: 10
+                                            font.weight: Font.Bold
+                                        }
+                                    }
+
+                                    Text {
+                                        objectName: "threadCardPosition"
+                                        visible: !threadCard.selectedMessage
+                                        Layout.alignment: Qt.AlignRight
+                                        text: threadCard.positionLabel
+                                        textFormat: Text.PlainText
+                                        color: Theme.textMuted
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 9
+                                    }
                                 }
                             }
 
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.store.openThreadMessage(threadCard.modelData)
+                                onClicked: {
+                                    threadCard.forceActiveFocus()
+                                    root.store.openThreadMessage(threadCard.modelData)
+                                }
+                            }
+
+                            Keys.onPressed: event => {
+                                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                                        || event.key === Qt.Key_Space) {
+                                    root.store.openThreadMessage(threadCard.modelData)
+                                    event.accepted = true
+                                }
+                            }
+
+                            Accessible.onPressAction: {
+                                threadCard.forceActiveFocus()
+                                root.store.openThreadMessage(modelData)
                             }
                         }
                     }

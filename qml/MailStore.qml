@@ -812,31 +812,52 @@ QtObject {
             const list = root.normalizeArray(result, "messages").filter(function(item) {
                 return root.belongsToAccount(item, requestedAccountId)
             })
-            if (list.length > 0) root.threadMessages = list
+            if (list.length > 0) {
+                root.threadMessages = list
+                root.refreshSelectedConversationMessageIds(list)
+            }
             root.activeThreadId = String(result && result.id || root.activeThreadId)
             root.threadTruncated = result && result.truncated === true
         })
     }
 
-    function applyOpenedMessage(detail, message, requestedAccountId, shouldMarkRead) {
+    function conversationMessageIdsFor(message, members) {
         const id = messageId(message)
-        if (!detail || !belongsToAccount(detail, requestedAccountId)) return false
+        const actionMailbox = messageMailboxId(message) || activeFolderId
         const actionIds = []
         const addActionId = function(value) {
             const candidate = String(value || "")
             if (candidate !== "" && actionIds.indexOf(candidate) < 0)
                 actionIds.push(candidate)
         }
-        const actionMailbox = messageMailboxId(message) || activeFolderId
-        const originalIds = Array.isArray(message.conversationMessageIds)
+        const originalIds = Array.isArray(message && message.conversationMessageIds)
             ? message.conversationMessageIds : []
         for (let i = 0; i < originalIds.length; ++i) addActionId(originalIds[i])
-        for (let i = 0; i < threadMessages.length; ++i) {
-            const member = threadMessages[i]
+        const list = Array.isArray(members) ? members : []
+        for (let i = 0; i < list.length; ++i) {
+            const member = list[i]
             if (messageMailboxId(member) === actionMailbox)
                 addActionId(messageId(member))
         }
         addActionId(id)
+        return actionIds
+    }
+
+    function refreshSelectedConversationMessageIds(members) {
+        if (!selectedMessage) return
+        const id = messageId(selectedMessage)
+        if (id === "") return
+        const actionIds = conversationMessageIdsFor(selectedMessage, members)
+        const changes = { conversationMessageIds: actionIds }
+        selectedMessage = Object.assign({}, selectedMessage, changes)
+        patchThreadMessage(id, changes)
+        patchCachedMessages([id], changes)
+    }
+
+    function applyOpenedMessage(detail, message, requestedAccountId, shouldMarkRead) {
+        const id = messageId(message)
+        if (!detail || !belongsToAccount(detail, requestedAccountId)) return false
+        const actionIds = conversationMessageIdsFor(message, threadMessages)
         const readState = shouldMarkRead
             ? { unread: false, is_read: true, read: true } : ({})
         // Current list metadata wins over a cached detail's flags, while body,
@@ -845,6 +866,7 @@ QtObject {
             { conversationMessageIds: actionIds }, readState)
         selectedMessage = conversationDetail
         patchThreadMessage(id, conversationDetail)
+        patchCachedMessages([id], { conversationMessageIds: actionIds })
         const detailThread = threadKey(conversationDetail)
         if (threadMessages.length <= 1 && detailThread !== activeThreadId) {
             activeThreadId = detailThread
