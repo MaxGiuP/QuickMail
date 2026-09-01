@@ -197,6 +197,8 @@ Item {
                     mobile: root.mobile
                     onMenuRequested: root.navigationOpen = true
                     onMessageActivated: root.openMessagePage()
+                    onComposeRequested: (mode, message) =>
+                        root.startContextCompose(mode, message)
                 }
 
                 Rectangle {

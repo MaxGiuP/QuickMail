@@ -5,11 +5,15 @@ import ".."
 
 Rectangle {
     id: root
+    objectName: "messageRow"
     required property var message
     property var avatarResolver: null
     property bool selected: false
     property bool compact: false
     signal activated()
+    signal contextRequested()
+    signal selectionRequested()
+    signal composeRequested(string mode)
     signal starRequested()
     signal archiveRequested()
     signal trashRequested()
@@ -32,6 +36,8 @@ Rectangle {
     readonly property string snippet: singleLine(message.snippet || message.preview || "")
     readonly property string timestamp: singleLine(formatTimestamp(message.received_display
         || message.date_display || message.time || message.timestamp || message.received_at || ""))
+    readonly property bool contextMenuVisible: contextMenu.visible
+    readonly property int contextMenuActionCount: contextMenu.visibleActionCount
 
     Accessible.role: Accessible.ListItem
     Accessible.selected: selected
@@ -70,6 +76,11 @@ Rectangle {
         const now = new Date()
         return date.toDateString() === now.toDateString()
             ? Qt.formatTime(date, "HH:mm") : Qt.formatDate(date, "d MMM")
+    }
+
+    function showContextMenu(x, y) {
+        contextRequested()
+        contextMenu.showAt(x, y)
     }
 
     height: compact ? 74 : 86
@@ -257,12 +268,16 @@ Rectangle {
         }
 
         IconButton {
+            objectName: "messageRowStarButton"
             Layout.preferredWidth: 32
             Layout.preferredHeight: 32
             Layout.alignment: Qt.AlignTop
             iconName: root.starred ? "star" : "starOutline"
             emphasized: root.starred
-            tip: root.starred ? "Unstar" : "Star"
+            tip: root.starred ? AgendaTranslations.tr("Unstar")
+                : AgendaTranslations.tr("Star")
+            onActiveFocusChanged: if (activeFocus) root.selectionRequested()
+            onPressed: root.selectionRequested()
             onClicked: root.starRequested()
         }
     }
@@ -272,19 +287,33 @@ Rectangle {
         anchors.fill: parent
         anchors.rightMargin: 40
         hoverEnabled: true
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        onClicked: mouse => {
-            if (mouse.button === Qt.RightButton) contextMenu.popup()
-            else root.activated()
-        }
+        acceptedButtons: Qt.LeftButton
+        onClicked: root.activated()
     }
 
-    Menu {
+    TapHandler {
+        objectName: "messageRowContextHandler"
+        acceptedButtons: Qt.RightButton
+        onTapped: eventPoint => root.showContextMenu(
+            eventPoint.position.x, eventPoint.position.y)
+    }
+
+    TapHandler {
+        objectName: "messageRowLongPressHandler"
+        acceptedDevices: PointerDevice.TouchScreen
+        gesturePolicy: TapHandler.DragThreshold
+        onLongPressed: root.showContextMenu(point.position.x, point.position.y)
+    }
+
+    MessageActionMenu {
         id: contextMenu
-        MenuItem { text: root.unread ? "Mark read" : "Mark unread"; onTriggered: root.readRequested(root.unread) }
-        MenuItem { text: root.starred ? "Unstar" : "Star"; onTriggered: root.starRequested() }
-        MenuSeparator {}
-        MenuItem { text: "Archive"; onTriggered: root.archiveRequested() }
-        MenuItem { text: "Move to trash"; onTriggered: root.trashRequested() }
+        message: root.message
+        includeOpen: true
+        onOpenRequested: root.activated()
+        onComposeRequested: mode => root.composeRequested(mode)
+        onReadRequested: read => root.readRequested(read)
+        onStarRequested: root.starRequested()
+        onArchiveRequested: root.archiveRequested()
+        onTrashRequested: root.trashRequested()
     }
 }

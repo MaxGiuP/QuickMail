@@ -9,10 +9,15 @@ Rectangle {
     id: root
     required property var store
     property bool mobile: false
+    property int _composeRequestGeneration: 0
+    readonly property string activeAccountKey: String(store.activeAccountId || "")
     signal menuRequested()
     signal messageActivated()
+    signal composeRequested(string mode, var message)
 
     color: Theme.canvas
+
+    onActiveAccountKeyChanged: ++_composeRequestGeneration
 
     function displayFolderName(folder) {
         return FolderPresentation.displayName(folder)
@@ -39,6 +44,54 @@ Rectangle {
                 || messageList.currentIndex >= store.conversations.length) return
         store.openMessage(store.conversations[messageList.currentIndex])
         messageActivated()
+    }
+
+    function showCursorContextMenu() {
+        if (messageList.currentIndex < 0) return false
+        const row = messageList.itemAtIndex(messageList.currentIndex)
+        if (!row || typeof row.showContextMenu !== "function") return false
+        row.showContextMenu(Math.max(12, row.width / 2),
+            Math.max(12, row.height / 2))
+        return true
+    }
+
+    function requestCompose(mode, message) {
+        const source = message || ({})
+        const generation = ++_composeRequestGeneration
+        const requestedAccountId = String(store.activeAccountId || "")
+        const deliver = function(detail) {
+            if (generation !== root._composeRequestGeneration) return
+            root.composeRequested(String(mode || "reply"),
+                Object.assign({}, detail || ({}), source))
+        }
+        if (typeof store.requestMessageDetail !== "function") {
+            deliver(null)
+            return
+        }
+        store.requestMessageDetail(source, function(detail, error) {
+            if (generation !== root._composeRequestGeneration
+                    || requestedAccountId !== String(store.activeAccountId || "")) return
+            if (error || !detail) {
+                store.errorText = error && error.message
+                    ? String(error.message)
+                    : AgendaTranslations.tr("Could not open this message")
+                return
+            }
+            const sourceId = typeof store.messageId === "function"
+                ? String(store.messageId(source) || "") : String(source.id || "")
+            const detailId = typeof store.messageId === "function"
+                ? String(store.messageId(detail) || "") : String(detail.id || "")
+            const detailAccountId = String(detail.accountId
+                || detail.account_id || requestedAccountId)
+            if (sourceId === "" || detailId !== sourceId
+                    || (requestedAccountId !== ""
+                        && detailAccountId !== requestedAccountId)) {
+                store.errorText = AgendaTranslations.tr(
+                    "The mail service sent an invalid response")
+                return
+            }
+            deliver(detail)
+        })
     }
 
     ColumnLayout {
@@ -139,6 +192,7 @@ Rectangle {
 
             ListView {
                 id: messageList
+                objectName: "messageListView"
                 anchors.fill: parent
                 anchors.margins: Theme.space2
                 visible: store.messages.length > 0
@@ -166,6 +220,12 @@ Rectangle {
                         store.openMessage(modelData)
                         root.messageActivated()
                     }
+                    onContextRequested: {
+                        messageList.currentIndex = index
+                        messageList.forceActiveFocus()
+                    }
+                    onSelectionRequested: messageList.currentIndex = index
+                    onComposeRequested: mode => root.requestCompose(mode, modelData)
                     onStarRequested: store.toggleStar(modelData)
                     onArchiveRequested: store.archive(modelData)
                     onTrashRequested: store.trash(modelData)
@@ -186,7 +246,11 @@ Rectangle {
                     if (atYEnd && store.hasMore && !store.loadingMore) store.loadMessages(false)
                 }
                 Keys.onPressed: event => {
-                    if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                    if (event.key === Qt.Key_Menu
+                            || (event.key === Qt.Key_F10
+                                && (event.modifiers & Qt.ShiftModifier))) {
+                        if (root.showCursorContextMenu()) event.accepted = true
+                    } else if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
                         root.moveCursor(1); event.accepted = true
                     } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
                         root.moveCursor(-1); event.accepted = true
