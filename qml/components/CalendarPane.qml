@@ -19,6 +19,7 @@ Rectangle {
     property var pendingDelete: null
 
     signal backRequested()
+    signal navigationRequested()
 
     readonly property bool compactLayout: mobile || width < 760
     readonly property date today: root.startOfDay(clock.now)
@@ -72,12 +73,43 @@ Rectangle {
         return first.getTime() === second.getTime()
     }
 
+    function utcCalendarDay(value) {
+        const instant = value instanceof Date ? value : new Date(value)
+        if (isNaN(instant.getTime())) return NaN
+        return Math.floor(Date.UTC(instant.getUTCFullYear(), instant.getUTCMonth(),
+            instant.getUTCDate()) / 86400000)
+    }
+
+    function localCalendarDay(value) {
+        const date = value instanceof Date ? value : new Date(value)
+        if (isNaN(date.getTime())) return NaN
+        return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
+            / 86400000)
+    }
+
+    function isAllDayEvent(event) {
+        return event && (event.allDay === true || event.all_day === true)
+    }
+
     function eventIntersectsDate(event, dateValue) {
-        const dayStart = startOfDay(dateValue).getTime()
-        const nextDay = endOfDay(dateValue).getTime()
         const start = timestamp(value(event, "startAt", "start_at"))
         let end = timestamp(value(event, "endAt", "end_at"))
         if (isNaN(start)) return false
+
+        // Calendar providers encode all-day dates as UTC-midnight boundaries,
+        // with the end date excluded. Treating those values as local instants
+        // shifts them during DST and makes a one-day event appear on tomorrow.
+        if (isAllDayEvent(event)) {
+            const day = localCalendarDay(dateValue)
+            const startDay = utcCalendarDay(start)
+            let endDay = utcCalendarDay(end)
+            if (isNaN(day) || isNaN(startDay)) return false
+            if (isNaN(endDay) || endDay <= startDay) endDay = startDay + 1
+            return day >= startDay && day < endDay
+        }
+
+        const dayStart = startOfDay(dateValue).getTime()
+        const nextDay = endOfDay(dateValue).getTime()
         if (isNaN(end) || end <= start) end = start + 1
         return start < nextDay && end > dayStart
     }
@@ -269,6 +301,10 @@ Rectangle {
         backRequested()
     }
 
+    function openNavigation() {
+        navigationRequested()
+    }
+
     function openEventComposer() {
         composer.openFor("event", selectedDate)
     }
@@ -428,52 +464,40 @@ Rectangle {
             spacing: 9
 
             Button {
-                id: backButton
+                id: navigationButton
 
-                implicitWidth: root.compactLayout ? 40 : backButtonContent.implicitWidth + 18
+                visible: root.mobile
+                implicitWidth: 40
                 implicitHeight: 40
                 leftPadding: 9
                 rightPadding: 9
                 hoverEnabled: true
                 focusPolicy: Qt.StrongFocus
-                text: AgendaTranslations.tr("Back to mail")
+                text: "Open navigation"
                 Accessible.name: text
-                onClicked: root.returnToMail()
+                onClicked: root.openNavigation()
 
-                contentItem: Row {
-                    id: backButtonContent
-                    spacing: 6
-
+                contentItem: Item {
                     Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: Theme.icon("back")
+                        anchors.centerIn: parent
+                        text: Theme.icon("menu")
                         color: Theme.textSecondary
                         font.family: Theme.iconFont
                         font.pixelSize: 20
-                    }
-
-                    Text {
-                        visible: !root.compactLayout
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: backButton.text
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 12
-                        font.weight: Font.Medium
                     }
                 }
 
                 background: Rectangle {
                     radius: Theme.radiusSmall
-                    color: backButton.down ? Theme.surfaceSelected
-                        : backButton.hovered || backButton.visualFocus
+                    color: navigationButton.down ? Theme.surfaceSelected
+                        : navigationButton.hovered || navigationButton.visualFocus
                             ? Theme.surfaceHover : "transparent"
-                    border.width: backButton.visualFocus ? 1 : 0
+                    border.width: navigationButton.visualFocus ? 1 : 0
                     border.color: Theme.accent
                 }
 
-                ToolTip.visible: backButton.hovered && root.compactLayout
-                ToolTip.text: backButton.text
+                ToolTip.visible: navigationButton.hovered
+                ToolTip.text: navigationButton.text
                 ToolTip.delay: 500
             }
 
@@ -485,7 +509,7 @@ Rectangle {
                 color: Theme.accentSoft
                 Text {
                     anchors.centerIn: parent
-                    text: "\ue935"
+                    text: Theme.icon("calendar")
                     color: Theme.accent
                     font.family: Theme.iconFont
                     font.pixelSize: 21

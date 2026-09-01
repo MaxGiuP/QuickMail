@@ -11,6 +11,7 @@ ApplicationWindow {
     height: 720
     color: Theme.canvas
     property int backRequests: 0
+    property int navigationRequests: 0
 
     function expect(condition, message) {
         if (condition) return
@@ -44,6 +45,11 @@ ApplicationWindow {
             description: "", startAt: new Date(2026, 8, 1, 10, 0).getTime(),
             endAt: new Date(2026, 8, 1, 10, 45).getTime(), allDay: false,
             readOnly: false
+        }, {
+            id: "event-summer-day", externalId: "", calendarId: "outlook-a",
+            calendarName: "Microsoft · alex@outlook.com", title: "One summer day",
+            description: "", startAt: Date.UTC(2026, 8, 19),
+            endAt: Date.UTC(2026, 8, 20), allDay: true, readOnly: false
         }]
         property bool agendaLoading: false
         property var lastTaskPayload: null
@@ -88,6 +94,7 @@ ApplicationWindow {
         selectedDate: new Date(2026, 8, 1)
         visibleMonth: new Date(2026, 8, 1)
         onBackRequested: ++window.backRequests
+        onNavigationRequested: ++window.navigationRequests
     }
 
     AgendaComposer {
@@ -121,6 +128,22 @@ ApplicationWindow {
                 "selected day did not combine its event and due task")
             window.expect(calendarPane.taskItems.length === 2,
                 "all-tasks view lost an unscheduled task")
+            const summerDay = fakeStore.events[1]
+            window.expect(calendarPane.eventIntersectsDate(
+                    summerDay, new Date(2026, 8, 19)),
+                "all-day event disappeared from its UTC calendar date")
+            window.expect(!calendarPane.eventIntersectsDate(
+                    summerDay, new Date(2026, 8, 20)),
+                "exclusive all-day end date leaked into an extra visible day")
+            const multiDayEvent = {
+                startAt: Date.UTC(2026, 8, 19), endAt: Date.UTC(2026, 8, 21),
+                allDay: true
+            }
+            window.expect(calendarPane.eventIntersectsDate(
+                    multiDayEvent, new Date(2026, 8, 20))
+                    && !calendarPane.eventIntersectsDate(
+                        multiDayEvent, new Date(2026, 8, 21)),
+                "multi-day event did not keep its provider end date exclusive")
             const allDayStart = composerUnderTest.utcMidnight(new Date(2026, 8, 1))
             window.expect(allDayStart.getUTCHours() === 0
                     && allDayStart.getUTCMinutes() === 0
@@ -220,6 +243,9 @@ ApplicationWindow {
             calendarPane.returnToMail()
             window.expect(window.backRequests === 1,
                 "the persistent back-to-mail action did not emit backRequested")
+            calendarPane.openNavigation()
+            window.expect(window.navigationRequests === 1,
+                "the mobile calendar could not reopen the parent navigation")
 
             calendarPane.selectDate(new Date(2026, 0, 31))
             calendarPane.showNextMonth()

@@ -26,10 +26,15 @@ find "$project_dir/qml" -name '*.qml' -print0 \
 cp -R "$project_dir/qml/." "$test_runtime_dir/"
 cp "$project_dir/qml/tests/SmokeHarness.qml" "$test_runtime_dir/shell.qml"
 
-for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke
+for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke NavigationHierarchySmoke
 do
   smoke_log=$(mktemp "${TMPDIR:-/tmp}/quickmail-qml-smoke.XXXXXX")
-  if ! QUICKMAIL_SMOKE="$smoke" XDG_CONFIG_HOME="$test_config_dir" \
+  smoke_timezone=${TZ:-UTC}
+  if [ "$smoke" = CalendarPaneSmoke ]; then
+    # Reproduce the UTC-midnight/local-date DST boundary used by providers.
+    smoke_timezone=Europe/London
+  fi
+  if ! TZ="$smoke_timezone" QUICKMAIL_SMOKE="$smoke" XDG_CONFIG_HOME="$test_config_dir" \
     QT_QPA_PLATFORM=offscreen timeout 10 qs --no-color \
     -p "$test_runtime_dir" >"$smoke_log" 2>&1; then
     cat "$smoke_log" >&2

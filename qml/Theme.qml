@@ -91,7 +91,8 @@ QtObject {
             compose: "\ue3c9", refresh: "\ue5d5", more: "\ue5d4", back: "\ue5c4",
             reply: "\ue15e", replyAll: "\ue15f", forward: "\ue154", close: "\ue5cd",
             send: "\ue163", attach: "\ue226", check: "\ue5ca", offline: "\ue2c1",
-            error: "\ue000", chevron: "\ue5cc", account: "\ue853", settings: "\ue8b8"
+            error: "\ue000", chevron: "\ue5cc", account: "\ue853", settings: "\ue8b8",
+            calendar: "\ue935"
         }
         return icons[name] || "\ue88e"
     }

@@ -9,6 +9,7 @@ Item {
 
     readonly property bool mobile: width < 720
     readonly property bool medium: width >= 720 && width < 1080
+    readonly property bool navigationCollapsed: width < 900
     property string mobilePage: "list"
     property bool navigationOpen: false
     property bool accountSetupOpen: false
@@ -154,10 +155,12 @@ Item {
 
                 NavigationPane {
                     visible: !root.mobile
-                    Layout.preferredWidth: root.medium ? 64 : 224
+                    Layout.preferredWidth: root.navigationCollapsed ? 64
+                        : root.medium ? 176 : 224
                     Layout.fillHeight: true
                     store: root.store
-                    collapsed: root.medium
+                    collapsed: root.navigationCollapsed
+                    onMailRequested: root.openMail()
                     onComposeRequested: root.startNewCompose()
                     onDraftsRequested: store.openDrafts()
                     onCalendarRequested: root.openCalendar()
@@ -220,6 +223,7 @@ Item {
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
+                    onNavigationRequested: root.navigationOpen = true
                     onBackRequested: root.openMail()
                 }
             }
@@ -273,6 +277,7 @@ Item {
                 visible: root.mobile
                 z: 21
                 store: root.store
+                onMailRequested: root.openMail()
                 onComposeRequested: {
                     root.navigationOpen = false
                     root.startNewCompose()
