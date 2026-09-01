@@ -170,6 +170,15 @@ ApplicationWindow {
             window.expect(menu !== null && row.contextMenuVisible
                     && menu.title === "Message actions",
                 "right click did not open the message actions menu")
+            window.expect(menu.openActionItem.icon.name === "document-open"
+                    && menu.replyActionItem.icon.name === "mail-reply-sender"
+                    && menu.replyAllActionItem.icon.name === "mail-reply-all"
+                    && menu.forwardActionItem.icon.name === "mail-forward"
+                    && menu.readActionItem.icon.name === "mail-mark-read"
+                    && menu.starActionItem.icon.name === "starred"
+                    && menu.archiveActionItem.icon.name === "archive"
+                    && menu.trashActionItem.icon.name === "user-trash",
+                "context-menu actions did not expose the expected system icons")
 
             menu.openActionItem.triggered()
             menu.replyActionItem.triggered()
@@ -234,8 +243,10 @@ ApplicationWindow {
             const row = window.named(listPane, "messageRow")
             const menu = window.named(row, "messageActionMenu")
             window.expect(menu.readActionItem.text === "Als ungelesen markieren"
-                    && menu.starActionItem.text === "Stern entfernen",
-                "German read/star state labels were not translated")
+                    && menu.starActionItem.text === "Stern entfernen"
+                    && menu.readActionItem.icon.name === "mail-mark-unread"
+                    && menu.starActionItem.icon.name === "non-starred",
+                "German read/star state labels or icons did not update")
             AgendaTranslations.localeOverride = "it_IT"
             row.message = window.summaryMessage
             italianCheck.start()
