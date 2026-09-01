@@ -40,7 +40,19 @@ Rectangle {
     opacity: completed ? 0.62 : pending ? 0.72 : 1
 
     Behavior on color {
-        ColorAnimation { duration: 100 }
+        enabled: Theme.animationsEnabled
+        ColorAnimation {
+            duration: Theme.motionFast
+            easing.type: Easing.OutCubic
+        }
+    }
+
+    Behavior on opacity {
+        enabled: Theme.animationsEnabled
+        NumberAnimation {
+            duration: Theme.motionMedium
+            easing.type: Easing.OutCubic
+        }
     }
 
     function dateTime(value) {
@@ -123,13 +135,29 @@ Rectangle {
                 border.color: taskCheck.checked ? Theme.accent
                     : taskCheck.visualFocus ? Theme.accent : Theme.textMuted
 
+                Behavior on color {
+                    enabled: Theme.animationsEnabled
+                    ColorAnimation {
+                        duration: Theme.motionFast
+                        easing.type: Easing.OutCubic
+                    }
+                }
+
                 Text {
                     anchors.centerIn: parent
-                    visible: taskCheck.checked
+                    opacity: taskCheck.checked ? 1 : 0
                     text: Theme.icon("check")
                     color: Theme.accentText
                     font.family: Theme.iconFont
                     font.pixelSize: 15
+
+                    Behavior on opacity {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation {
+                            duration: Theme.motionQuick
+                            easing.type: Easing.OutCubic
+                        }
+                    }
                 }
             }
             onToggled: {

@@ -746,7 +746,8 @@ Rectangle {
                                     : AgendaTranslations.tr("Read message")
 
                             Behavior on color {
-                                ColorAnimation { duration: 140 }
+                                enabled: Theme.animationsEnabled
+                                ColorAnimation { duration: Theme.motionMedium }
                             }
 
                             RowLayout {

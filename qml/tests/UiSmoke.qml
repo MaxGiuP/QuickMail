@@ -19,6 +19,8 @@ ApplicationWindow {
         provider: "Gmail", unread: 4
     }]
 
+    Component.onCompleted: Theme.animationsOverride = 1
+
     function expect(condition, message) {
         if (condition) return
         console.error("UI SMOKE TEST FAILED: " + message)

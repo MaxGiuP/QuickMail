@@ -7,6 +7,18 @@ import Quickshell.Io
 QtObject {
     id: root
 
+    // -1 follows the desktop preference, 0 disables motion, and 1 enables it.
+    // The override is intentionally writable so UI smoke tests can be deterministic.
+    property int animationsOverride: -1
+    property bool _systemAnimationsEnabled: true
+    property bool _systemAnimationsPreferenceSeen: false
+    readonly property bool animationsEnabled: animationsOverride === 0 ? false
+        : animationsOverride === 1 ? true : _systemAnimationsEnabled
+    readonly property int motionQuick: 80
+    readonly property int motionFast: 100
+    readonly property int motionMedium: 140
+    readonly property int motionSlow: 180
+
     readonly property string systemPalettePath: {
         const stateHome = String(Quickshell.env("XDG_STATE_HOME") || "").trim()
         const home = String(Quickshell.env("HOME") || "").trim()
@@ -68,6 +80,18 @@ QtObject {
     function systemPaletteValue(name) {
         const value = root.systemPalette ? root.systemPalette[name] : undefined
         return typeof value === "string" && value !== "" ? value : ""
+    }
+
+    function applySystemAnimationsPreference(value) {
+        const normalized = value === undefined || value === null
+            ? "" : String(value).trim().toLowerCase()
+        if (normalized === "true" || normalized.endsWith(": true")) {
+            root._systemAnimationsEnabled = true
+            root._systemAnimationsPreferenceSeen = true
+        } else if (normalized === "false" || normalized.endsWith(": false")) {
+            root._systemAnimationsEnabled = false
+            root._systemAnimationsPreferenceSeen = true
+        }
     }
 
     function colorLuminance(value) {
@@ -133,6 +157,34 @@ QtObject {
         } catch (error) {
             console.warn("[QuickMail] Could not parse the system Material palette:", error)
             root.systemPalette = ({})
+        }
+    }
+
+    property Process _systemAnimationsReadProcess: Process {
+        command: ["gsettings", "get", "org.gnome.desktop.interface", "enable-animations"]
+        running: true
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: root.applySystemAnimationsPreference(text)
+        }
+        stderr: StdioCollector {}
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0 && !root._systemAnimationsPreferenceSeen)
+                root._systemAnimationsEnabled = true
+        }
+    }
+
+    property Process _systemAnimationsMonitorProcess: Process {
+        command: ["gsettings", "monitor", "org.gnome.desktop.interface", "enable-animations"]
+        running: true
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: data => root.applySystemAnimationsPreference(data)
+        }
+        stderr: StdioCollector {}
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0 && !root._systemAnimationsPreferenceSeen)
+                root._systemAnimationsEnabled = true
         }
     }
 

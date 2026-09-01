@@ -58,7 +58,11 @@ ComboBox {
         rotation: root.popup.visible ? 90 : 0
 
         Behavior on rotation {
-            NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+            enabled: Theme.animationsEnabled
+            NumberAnimation {
+                duration: Theme.motionMedium
+                easing.type: Easing.OutCubic
+            }
         }
     }
 
@@ -71,7 +75,8 @@ ComboBox {
         border.color: Theme.accent
 
         Behavior on color {
-            ColorAnimation { duration: 100 }
+            enabled: Theme.animationsEnabled
+            ColorAnimation { duration: Theme.motionFast }
         }
     }
 
@@ -120,7 +125,8 @@ ComboBox {
                 : option.hovered || option.highlighted ? Theme.surfaceHover : "transparent"
 
             Behavior on color {
-                ColorAnimation { duration: 90 }
+                enabled: Theme.animationsEnabled
+                ColorAnimation { duration: Theme.motionFast }
             }
         }
     }
@@ -136,12 +142,28 @@ ComboBox {
 
         enter: Transition {
             ParallelAnimation {
-                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 100 }
-                NumberAnimation { property: "scale"; from: 0.98; to: 1; duration: 100; easing.type: Easing.OutCubic }
+                NumberAnimation {
+                    property: "opacity"
+                    from: 0
+                    to: 1
+                    duration: Theme.animationsEnabled ? Theme.motionFast : 0
+                }
+                NumberAnimation {
+                    property: "scale"
+                    from: 0.98
+                    to: 1
+                    duration: Theme.animationsEnabled ? Theme.motionFast : 0
+                    easing.type: Easing.OutCubic
+                }
             }
         }
         exit: Transition {
-            NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 80 }
+            NumberAnimation {
+                property: "opacity"
+                from: 1
+                to: 0
+                duration: Theme.animationsEnabled ? Theme.motionQuick : 0
+            }
         }
 
         background: Rectangle {

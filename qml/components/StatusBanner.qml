@@ -7,10 +7,14 @@ Rectangle {
     objectName: "statusBanner"
     property string kind: "offline" // offline | error | syncing
     property string message: ""
+    readonly property bool shown: message !== ""
     signal dismissed()
 
-    visible: message !== ""
-    implicitHeight: visible ? 40 : 0
+    visible: shown || opacity > 0.01
+    enabled: shown
+    clip: true
+    opacity: shown ? 1 : 0
+    implicitHeight: shown ? 40 : 0
     color: kind === "error" ? Qt.rgba(1, 0.25, 0.3, 0.14)
         : kind === "syncing" ? Theme.surfaceRaised
         : Qt.rgba(0.94, 0.74, 0.42, 0.13)
@@ -19,6 +23,17 @@ Rectangle {
         : kind === "syncing" ? Theme.borderSoft
         : Qt.rgba(0.94, 0.74, 0.42, 0.35)
 
+    Behavior on opacity {
+        enabled: Theme.animationsEnabled
+        NumberAnimation { duration: Theme.motionFast }
+    }
+    Behavior on implicitHeight {
+        enabled: Theme.animationsEnabled
+        NumberAnimation {
+            duration: Theme.motionMedium
+            easing.type: Easing.OutCubic
+        }
+    }
     RowLayout {
         anchors.fill: parent
         anchors.leftMargin: 14

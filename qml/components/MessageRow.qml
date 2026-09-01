@@ -89,6 +89,11 @@ Rectangle {
     color: selected ? Theme.surfaceSelected
         : rowMouse.containsMouse ? Theme.surfaceHover : "transparent"
 
+    Behavior on color {
+        enabled: Theme.animationsEnabled
+        ColorAnimation { duration: Theme.motionFast }
+    }
+
     RowLayout {
         objectName: "messageRowContent"
         anchors.fill: parent
@@ -153,11 +158,26 @@ Rectangle {
                 Layout.minimumWidth: 0
                 spacing: 8
                 Rectangle {
-                    visible: root.unread
+                    id: unreadIndicator
+                    objectName: "messageRowUnreadIndicator"
                     Layout.preferredWidth: 6
                     Layout.preferredHeight: 6
                     radius: 3
                     color: Theme.accent
+                    opacity: root.unread ? 1 : 0
+                    scale: root.unread ? 1 : 0.72
+
+                    Behavior on opacity {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation { duration: Theme.motionFast }
+                    }
+                    Behavior on scale {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation {
+                            duration: Theme.motionMedium
+                            easing.type: Easing.OutCubic
+                        }
+                    }
                 }
                 Text {
                     objectName: "messageRowSender"

@@ -11,6 +11,8 @@ ApplicationWindow {
     height: 220
     color: Theme.canvas
 
+    Component.onCompleted: Theme.animationsOverride = 1
+
     function expect(condition, message) {
         if (condition) return
         console.error("QML SMOKE TEST FAILED: theme controls: " + message)

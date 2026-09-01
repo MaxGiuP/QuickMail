@@ -33,6 +33,25 @@ Menu {
     objectName: "messageActionMenu"
     title: AgendaTranslations.tr("Message actions")
 
+    enter: Transition {
+        NumberAnimation {
+            property: "opacity"
+            from: 0
+            to: 1
+            duration: Theme.animationsEnabled ? Theme.motionFast : 0
+            easing.type: Easing.OutCubic
+        }
+    }
+    exit: Transition {
+        NumberAnimation {
+            property: "opacity"
+            from: 1
+            to: 0
+            duration: Theme.animationsEnabled ? Theme.motionQuick : 0
+            easing.type: Easing.OutCubic
+        }
+    }
+
     function showAt(x, y) {
         const targetX = isFinite(Number(x)) ? Number(x) : 12
         const targetY = isFinite(Number(y)) ? Number(y) : 12

@@ -59,10 +59,17 @@ Rectangle {
     transform: Translate {
         y: root.open ? 0 : 18
         Behavior on y {
-            NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+            enabled: Theme.animationsEnabled
+            NumberAnimation {
+                duration: Theme.motionMedium
+                easing.type: Easing.OutCubic
+            }
         }
     }
-    Behavior on opacity { NumberAnimation { duration: 140 } }
+    Behavior on opacity {
+        enabled: Theme.animationsEnabled
+        NumberAnimation { duration: Theme.motionMedium }
+    }
 
     function parseAddresses(value) {
         return String(value || "").split(/[,;]/).map(function(part) {

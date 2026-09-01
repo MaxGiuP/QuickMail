@@ -11,6 +11,7 @@ ApplicationWindow {
     height: 720
     color: Theme.canvas
     property int phase: 0
+    property int settleAttempts: 0
     property var destinationModel: [{
         accountId: "",
         provider: "local",
@@ -81,22 +82,34 @@ ApplicationWindow {
 
     Timer {
         id: settleTimer
-        interval: 80
+        interval: 20
         running: true
-        repeat: false
+        repeat: true
         onTriggered: {
+            ++window.settleAttempts
+            const activeComposer = window.phase === 0
+                ? desktopComposer : compactComposer
+            if (!activeComposer.opened) {
+                if (window.settleAttempts >= 100)
+                    window.expect(false, window.phase === 0
+                        ? "desktop task composer did not open"
+                        : "compact task composer did not open")
+                return
+            }
+
             if (window.phase === 0) {
                 window.checkLayout(desktopComposer, 560, 650, "desktop")
                 desktopComposer.close()
                 window.phase = 1
+                window.settleAttempts = 0
                 compactComposer.openFor("task", new Date(2026, 8, 1))
-                settleTimer.restart()
                 return
             }
 
             window.checkLayout(compactComposer, 388, 488, "compact")
             window.expect(compactComposer.formWidth >= 359,
                 "compact task form left an excessive empty gutter")
+            settleTimer.stop()
             Qt.exit(0)
         }
     }

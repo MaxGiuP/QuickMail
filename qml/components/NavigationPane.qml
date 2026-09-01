@@ -97,6 +97,14 @@ Rectangle {
                                 ? Theme.accentSoftText : Theme.textSecondary
                             font.family: Theme.iconFont
                             font.pixelSize: 19
+
+                            Behavior on color {
+                                enabled: Theme.animationsEnabled
+                                ColorAnimation {
+                                    duration: Theme.motionFast
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
                         }
                         Text {
                             visible: !root.collapsed
@@ -106,6 +114,14 @@ Rectangle {
                             font.family: Theme.fontFamily
                             font.pixelSize: 12
                             font.weight: Font.DemiBold
+
+                            Behavior on color {
+                                enabled: Theme.animationsEnabled
+                                ColorAnimation {
+                                    duration: Theme.motionFast
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
                         }
                         Item { Layout.fillWidth: true }
                     }
@@ -118,6 +134,14 @@ Rectangle {
                                 ? Theme.surfaceHover : "transparent"
                         border.width: mailParentButton.visualFocus ? 1 : 0
                         border.color: Theme.accent
+
+                        Behavior on color {
+                            enabled: Theme.animationsEnabled
+                            ColorAnimation {
+                                duration: Theme.motionFast
+                                easing.type: Easing.OutCubic
+                            }
+                        }
                     }
 
                     ToolTip.visible: root.collapsed && hovered
@@ -147,6 +171,14 @@ Rectangle {
                                 ? Theme.accentSoftText : Theme.textSecondary
                             font.family: Theme.iconFont
                             font.pixelSize: 19
+
+                            Behavior on color {
+                                enabled: Theme.animationsEnabled
+                                ColorAnimation {
+                                    duration: Theme.motionFast
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
                         }
                         Text {
                             visible: !root.collapsed
@@ -156,6 +188,14 @@ Rectangle {
                             font.family: Theme.fontFamily
                             font.pixelSize: 12
                             font.weight: Font.DemiBold
+
+                            Behavior on color {
+                                enabled: Theme.animationsEnabled
+                                ColorAnimation {
+                                    duration: Theme.motionFast
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
                         }
                         Item { Layout.fillWidth: true }
                     }
@@ -168,6 +208,14 @@ Rectangle {
                                 ? Theme.surfaceHover : "transparent"
                         border.width: calendarParentButton.visualFocus ? 1 : 0
                         border.color: Theme.accent
+
+                        Behavior on color {
+                            enabled: Theme.animationsEnabled
+                            ColorAnimation {
+                                duration: Theme.motionFast
+                                easing.type: Easing.OutCubic
+                            }
+                        }
                     }
 
                     ToolTip.visible: root.collapsed && hovered
@@ -181,9 +229,18 @@ Rectangle {
             id: mailNavigation
 
             visible: root.mailParentSelected
+            opacity: root.mailParentSelected ? 1 : 0
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 4
+
+            Behavior on opacity {
+                enabled: Theme.animationsEnabled
+                NumberAnimation {
+                    duration: Theme.motionMedium
+                    easing.type: Easing.OutCubic
+                }
+            }
 
             Text {
                 visible: !root.collapsed
@@ -224,6 +281,14 @@ Rectangle {
                         color: root.store.draftsOpen ? Theme.accent : Theme.textSecondary
                         font.family: Theme.iconFont
                         font.pixelSize: 20
+
+                        Behavior on color {
+                            enabled: Theme.animationsEnabled
+                            ColorAnimation {
+                                duration: Theme.motionFast
+                                easing.type: Easing.OutCubic
+                            }
+                        }
                     }
                     Text {
                         visible: !root.collapsed
@@ -251,6 +316,14 @@ Rectangle {
                             ? Theme.surfaceHover : "transparent"
                     border.width: savedDraftsButton.visualFocus ? 1 : 0
                     border.color: Theme.accent
+
+                    Behavior on color {
+                        enabled: Theme.animationsEnabled
+                        ColorAnimation {
+                            duration: Theme.motionFast
+                            easing.type: Easing.OutCubic
+                        }
+                    }
                 }
                 ToolTip.visible: root.collapsed && hovered
                 ToolTip.text: "Saved drafts"
@@ -300,6 +373,15 @@ Rectangle {
                         || modelData.folder_id || "")
                     readonly property string folderName: root.displayFolderName(modelData)
                     readonly property string folderIcon: root.displayFolderIcon(modelData)
+
+                    Behavior on color {
+                        enabled: Theme.animationsEnabled
+                        ColorAnimation {
+                            duration: Theme.motionFast
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 10
@@ -312,6 +394,14 @@ Rectangle {
                                 ? Theme.accent : Theme.textSecondary
                             font.family: Theme.iconFont
                             font.pixelSize: 20
+
+                            Behavior on color {
+                                enabled: Theme.animationsEnabled
+                                ColorAnimation {
+                                    duration: Theme.motionFast
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
                         }
                         Text {
                             visible: !root.collapsed
@@ -354,10 +444,21 @@ Rectangle {
         }
 
         ColumnLayout {
+            id: calendarNavigation
+
             visible: root.calendarParentSelected
+            opacity: root.calendarParentSelected ? 1 : 0
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
+
+            Behavior on opacity {
+                enabled: Theme.animationsEnabled
+                NumberAnimation {
+                    duration: Theme.motionMedium
+                    easing.type: Easing.OutCubic
+                }
+            }
 
             Text {
                 visible: !root.collapsed
@@ -464,6 +565,15 @@ Rectangle {
                 radius: Theme.radiusSmall
                 color: String(modelData.id || modelData.account_id || "") === store.activeAccountId
                     ? Theme.surfaceHover : accountMouse.containsMouse ? Theme.surfaceHover : "transparent"
+
+                Behavior on color {
+                    enabled: Theme.animationsEnabled
+                    ColorAnimation {
+                        duration: Theme.motionFast
+                        easing.type: Easing.OutCubic
+                    }
+                }
+
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 6

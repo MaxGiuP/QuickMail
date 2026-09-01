@@ -33,6 +33,43 @@ Dialog {
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
 
+    enter: Transition {
+        ParallelAnimation {
+            NumberAnimation {
+                property: "opacity"
+                from: 0
+                to: 1
+                duration: Theme.animationsEnabled ? Theme.motionMedium : 0
+                easing.type: Easing.OutCubic
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 0.985
+                to: 1
+                duration: Theme.animationsEnabled ? Theme.motionMedium : 0
+                easing.type: Easing.OutCubic
+            }
+        }
+    }
+    exit: Transition {
+        ParallelAnimation {
+            NumberAnimation {
+                property: "opacity"
+                from: 1
+                to: 0
+                duration: Theme.animationsEnabled ? Theme.motionQuick : 0
+                easing.type: Easing.OutCubic
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 1
+                to: 0.985
+                duration: Theme.animationsEnabled ? Theme.motionQuick : 0
+                easing.type: Easing.OutCubic
+            }
+        }
+    }
+
     function twoDigits(value) {
         return value < 10 ? "0" + value : String(value)
     }

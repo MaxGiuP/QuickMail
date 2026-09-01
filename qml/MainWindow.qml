@@ -10,6 +10,12 @@ Item {
     readonly property bool mobile: width < 720
     readonly property bool medium: width >= 720 && width < 1080
     readonly property bool navigationCollapsed: width < 900
+    readonly property bool messageListActive: store.view !== "calendar"
+        && !store.draftsOpen && (!mobile || mobilePage === "list")
+    readonly property bool messageReaderActive: store.view !== "calendar"
+        && !store.draftsOpen && (!mobile || mobilePage === "reader")
+    readonly property bool draftsActive: store.view !== "calendar" && store.draftsOpen
+    readonly property bool calendarActive: store.view === "calendar"
     property string mobilePage: "list"
     property bool navigationOpen: false
     property bool accountSetupOpen: false
@@ -188,8 +194,9 @@ Item {
 
                 MessageListPane {
                     id: messageListPane
-                    visible: store.view !== "calendar" && !store.draftsOpen
-                        && (!root.mobile || root.mobilePage === "list")
+                    visible: root.messageListActive
+                    enabled: root.messageListActive
+                    opacity: root.messageListActive ? 1 : 0
                     Layout.preferredWidth: root.mobile ? -1 : root.medium ? 330 : 390
                     Layout.fillWidth: root.mobile
                     Layout.fillHeight: true
@@ -199,6 +206,21 @@ Item {
                     onMessageActivated: root.openMessagePage()
                     onComposeRequested: (mode, message) =>
                         root.startContextCompose(mode, message)
+
+                    transform: Translate {
+                        x: root.messageListActive ? 0 : -12
+                        Behavior on x {
+                            enabled: Theme.animationsEnabled
+                            NumberAnimation {
+                                duration: Theme.motionMedium
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                    }
+                    Behavior on opacity {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation { duration: Theme.motionFast }
+                    }
                 }
 
                 Rectangle {
@@ -210,8 +232,9 @@ Item {
 
                 MessageReaderPane {
                     id: messageReaderPane
-                    visible: store.view !== "calendar" && !store.draftsOpen
-                        && (!root.mobile || root.mobilePage === "reader")
+                    visible: root.messageReaderActive
+                    enabled: root.messageReaderActive
+                    opacity: root.messageReaderActive ? 1 : 0
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
@@ -219,29 +242,78 @@ Item {
                     onBackRequested: root.returnToList()
                     onComposeRequested: (mode, message) =>
                         root.startContextCompose(mode, message)
+
+                    transform: Translate {
+                        x: root.messageReaderActive ? 0 : 12
+                        Behavior on x {
+                            enabled: Theme.animationsEnabled
+                            NumberAnimation {
+                                duration: Theme.motionMedium
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                    }
+                    Behavior on opacity {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation { duration: Theme.motionFast }
+                    }
                 }
 
                 DraftsPane {
                     id: draftsPane
 
-                    visible: store.view !== "calendar" && store.draftsOpen
+                    visible: root.draftsActive
+                    enabled: root.draftsActive
+                    opacity: root.draftsActive ? 1 : 0
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
                     persistentNavigation: navigationRail.visible
                     onBackRequested: store.closeDrafts()
+
+                    transform: Translate {
+                        x: root.draftsActive ? 0 : 12
+                        Behavior on x {
+                            enabled: Theme.animationsEnabled
+                            NumberAnimation {
+                                duration: Theme.motionMedium
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                    }
+                    Behavior on opacity {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation { duration: Theme.motionFast }
+                    }
                 }
 
                 CalendarPane {
                     id: calendarPane
-                    visible: store.view === "calendar"
+                    visible: root.calendarActive
+                    enabled: root.calendarActive
+                    opacity: root.calendarActive ? 1 : 0
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
                     onNavigationRequested: root.navigationOpen = true
                     onBackRequested: root.openMail()
+
+                    transform: Translate {
+                        x: root.calendarActive ? 0 : 12
+                        Behavior on x {
+                            enabled: Theme.animationsEnabled
+                            NumberAnimation {
+                                duration: Theme.motionMedium
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                    }
+                    Behavior on opacity {
+                        enabled: Theme.animationsEnabled
+                        NumberAnimation { duration: Theme.motionFast }
+                    }
                 }
             }
 
@@ -269,18 +341,35 @@ Item {
                 onCloseOperationFailed: root.windowClosePending = false
 
                 Behavior on width {
-                    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                    enabled: Theme.animationsEnabled
+                    NumberAnimation {
+                        duration: Theme.motionSlow
+                        easing.type: Easing.OutCubic
+                    }
                 }
                 Behavior on height {
-                    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                    enabled: Theme.animationsEnabled
+                    NumberAnimation {
+                        duration: Theme.motionSlow
+                        easing.type: Easing.OutCubic
+                    }
                 }
             }
 
             Rectangle {
+                id: navigationScrim
                 anchors.fill: parent
-                visible: root.mobile && root.navigationOpen
+                visible: root.mobile && (root.navigationOpen || opacity > 0.01)
+                enabled: root.mobile && root.navigationOpen
+                opacity: root.mobile && root.navigationOpen ? 1 : 0
                 color: "#80000000"
                 z: 20
+
+                Behavior on opacity {
+                    enabled: Theme.animationsEnabled
+                    NumberAnimation { duration: Theme.motionMedium }
+                }
+
                 MouseArea {
                     anchors.fill: parent
                     onClicked: root.navigationOpen = false
@@ -305,7 +394,13 @@ Item {
                 }
                 onCalendarRequested: root.openCalendar()
                 onAccountSetupRequested: account => root.openAccountSetup(account)
-                Behavior on x { NumberAnimation { duration: 170; easing.type: Easing.OutCubic } }
+                Behavior on x {
+                    enabled: Theme.animationsEnabled
+                    NumberAnimation {
+                        duration: Theme.motionSlow
+                        easing.type: Easing.OutCubic
+                    }
+                }
             }
 
             AccountSetupPane {

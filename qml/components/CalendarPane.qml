@@ -727,6 +727,14 @@ Rectangle {
                                             ? (dayButton.selected ? Theme.accentText : Theme.accent)
                                             : Theme.accent
 
+                                        Behavior on color {
+                                            enabled: Theme.animationsEnabled
+                                            ColorAnimation {
+                                                duration: Theme.motionFast
+                                                easing.type: Easing.OutCubic
+                                            }
+                                        }
+
                                         Text {
                                             anchors.centerIn: parent
                                             text: dayButton.day.getDate()
@@ -737,6 +745,14 @@ Rectangle {
                                             font.pixelSize: 12
                                             font.weight: dayButton.currentDay || dayButton.selected
                                                 ? Font.DemiBold : Font.Normal
+
+                                            Behavior on color {
+                                                enabled: Theme.animationsEnabled
+                                                ColorAnimation {
+                                                    duration: Theme.motionFast
+                                                    easing.type: Easing.OutCubic
+                                                }
+                                            }
                                         }
                                     }
 
@@ -886,6 +902,14 @@ Rectangle {
                                     font.weight: Font.DemiBold
                                     horizontalAlignment: Text.AlignHCenter
                                     verticalAlignment: Text.AlignVCenter
+
+                                    Behavior on color {
+                                        enabled: Theme.animationsEnabled
+                                        ColorAnimation {
+                                            duration: Theme.motionFast
+                                            easing.type: Easing.OutCubic
+                                        }
+                                    }
                                 }
                                 background: Rectangle {
                                     radius: Theme.radiusSmall
@@ -893,6 +917,14 @@ Rectangle {
                                         : parent.hovered ? Theme.surfaceHover : "transparent"
                                     border.width: parent.visualFocus ? 1 : 0
                                     border.color: Theme.accent
+
+                                    Behavior on color {
+                                        enabled: Theme.animationsEnabled
+                                        ColorAnimation {
+                                            duration: Theme.motionFast
+                                            easing.type: Easing.OutCubic
+                                        }
+                                    }
                                 }
                             }
                             Button {
@@ -913,6 +945,14 @@ Rectangle {
                                     font.weight: Font.DemiBold
                                     horizontalAlignment: Text.AlignHCenter
                                     verticalAlignment: Text.AlignVCenter
+
+                                    Behavior on color {
+                                        enabled: Theme.animationsEnabled
+                                        ColorAnimation {
+                                            duration: Theme.motionFast
+                                            easing.type: Easing.OutCubic
+                                        }
+                                    }
                                 }
                                 background: Rectangle {
                                     radius: Theme.radiusSmall
@@ -920,6 +960,14 @@ Rectangle {
                                         : parent.hovered ? Theme.surfaceHover : "transparent"
                                     border.width: parent.visualFocus ? 1 : 0
                                     border.color: Theme.accent
+
+                                    Behavior on color {
+                                        enabled: Theme.animationsEnabled
+                                        ColorAnimation {
+                                            duration: Theme.motionFast
+                                            easing.type: Easing.OutCubic
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -935,77 +983,137 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
 
-                        EmptyState {
-                            anchors.fill: parent
-                            visible: root.activeTab === 0 && root.selectedAgenda.length === 0
-                            iconName: "check"
-                            title: AgendaTranslations.tr("Nothing planned")
-                            detail: AgendaTranslations.tr("This day is clear. Add an event or task when you’re ready.")
-                            actionText: AgendaTranslations.tr("Add event")
-                            onAction: root.openEventComposer()
-                        }
+                        Item {
+                            id: agendaContent
 
-                        EmptyState {
                             anchors.fill: parent
-                            visible: root.activeTab === 1 && root.taskItems.length === 0
-                            iconName: "check"
-                            title: AgendaTranslations.tr("No tasks yet")
-                            detail: AgendaTranslations.tr("Create a local task or send it to a connected account.")
-                            actionText: AgendaTranslations.tr("Add task")
-                            onAction: root.openTaskComposer()
-                        }
+                            visible: root.activeTab === 0
+                            opacity: root.activeTab === 0 ? 1 : 0
+                            property real entranceOffset: root.activeTab === 0
+                                ? 0 : Theme.space2
 
-                        ListView {
-                            id: agendaList
-                            anchors.fill: parent
-                            anchors.margins: Theme.space3
-                            visible: root.activeTab === 0 && root.selectedAgenda.length > 0
-                            model: root.selectedAgenda
-                            spacing: 7
-                            clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            ScrollBar.vertical: ScrollBar {}
+                            transform: Translate {
+                                y: agendaContent.entranceOffset
+                            }
 
-                            delegate: AgendaRow {
-                                required property var modelData
-                                required property int index
-                                width: agendaList.width - (agendaList.ScrollBar.vertical.visible ? 10 : 0)
-                                kind: modelData.kind
-                                entry: modelData.item
-                                compact: root.compactLayout
-                                destinationLabel: root.entryDestination(kind, entry)
-                                pending: root.pendingEntryId !== ""
-                                    && root.pendingEntryKind === kind
-                                    && root.pendingEntryId === root.itemId(entry)
-                                onCompletionRequested: done => root.setTaskDone(entry, done)
-                                onDeleteRequested: root.requestDelete(kind, entry)
+                            Behavior on entranceOffset {
+                                enabled: Theme.animationsEnabled
+                                NumberAnimation {
+                                    duration: Theme.motionMedium
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+
+                            Behavior on opacity {
+                                enabled: Theme.animationsEnabled
+                                NumberAnimation {
+                                    duration: Theme.motionMedium
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+
+                            EmptyState {
+                                anchors.fill: parent
+                                visible: root.selectedAgenda.length === 0
+                                iconName: "check"
+                                title: AgendaTranslations.tr("Nothing planned")
+                                detail: AgendaTranslations.tr("This day is clear. Add an event or task when you’re ready.")
+                                actionText: AgendaTranslations.tr("Add event")
+                                onAction: root.openEventComposer()
+                            }
+
+                            ListView {
+                                id: agendaList
+                                anchors.fill: parent
+                                anchors.margins: Theme.space3
+                                visible: root.selectedAgenda.length > 0
+                                model: root.selectedAgenda
+                                spacing: 7
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: ScrollBar {}
+
+                                delegate: AgendaRow {
+                                    required property var modelData
+                                    required property int index
+                                    width: agendaList.width - (agendaList.ScrollBar.vertical.visible ? 10 : 0)
+                                    kind: modelData.kind
+                                    entry: modelData.item
+                                    compact: root.compactLayout
+                                    destinationLabel: root.entryDestination(kind, entry)
+                                    pending: root.pendingEntryId !== ""
+                                        && root.pendingEntryKind === kind
+                                        && root.pendingEntryId === root.itemId(entry)
+                                    onCompletionRequested: done => root.setTaskDone(entry, done)
+                                    onDeleteRequested: root.requestDelete(kind, entry)
+                                }
                             }
                         }
 
-                        ListView {
-                            id: taskList
-                            anchors.fill: parent
-                            anchors.margins: Theme.space3
-                            visible: root.activeTab === 1 && root.taskItems.length > 0
-                            model: root.taskItems
-                            spacing: 7
-                            clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            ScrollBar.vertical: ScrollBar {}
+                        Item {
+                            id: taskContent
 
-                            delegate: AgendaRow {
-                                required property var modelData
-                                required property int index
-                                width: taskList.width - (taskList.ScrollBar.vertical.visible ? 10 : 0)
-                                kind: "task"
-                                entry: modelData
-                                compact: root.compactLayout
-                                destinationLabel: root.entryDestination("task", entry)
-                                pending: root.pendingEntryId !== ""
-                                    && root.pendingEntryKind === "task"
-                                    && root.pendingEntryId === root.itemId(entry)
-                                onCompletionRequested: done => root.setTaskDone(entry, done)
-                                onDeleteRequested: root.requestDelete("task", entry)
+                            anchors.fill: parent
+                            visible: root.activeTab === 1
+                            opacity: root.activeTab === 1 ? 1 : 0
+                            property real entranceOffset: root.activeTab === 1
+                                ? 0 : Theme.space2
+
+                            transform: Translate {
+                                y: taskContent.entranceOffset
+                            }
+
+                            Behavior on entranceOffset {
+                                enabled: Theme.animationsEnabled
+                                NumberAnimation {
+                                    duration: Theme.motionMedium
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+
+                            Behavior on opacity {
+                                enabled: Theme.animationsEnabled
+                                NumberAnimation {
+                                    duration: Theme.motionMedium
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+
+                            EmptyState {
+                                anchors.fill: parent
+                                visible: root.taskItems.length === 0
+                                iconName: "check"
+                                title: AgendaTranslations.tr("No tasks yet")
+                                detail: AgendaTranslations.tr("Create a local task or send it to a connected account.")
+                                actionText: AgendaTranslations.tr("Add task")
+                                onAction: root.openTaskComposer()
+                            }
+
+                            ListView {
+                                id: taskList
+                                anchors.fill: parent
+                                anchors.margins: Theme.space3
+                                visible: root.taskItems.length > 0
+                                model: root.taskItems
+                                spacing: 7
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: ScrollBar {}
+
+                                delegate: AgendaRow {
+                                    required property var modelData
+                                    required property int index
+                                    width: taskList.width - (taskList.ScrollBar.vertical.visible ? 10 : 0)
+                                    kind: "task"
+                                    entry: modelData
+                                    compact: root.compactLayout
+                                    destinationLabel: root.entryDestination("task", entry)
+                                    pending: root.pendingEntryId !== ""
+                                        && root.pendingEntryKind === "task"
+                                        && root.pendingEntryId === root.itemId(entry)
+                                    onCompletionRequested: done => root.setTaskDone(entry, done)
+                                    onDeleteRequested: root.requestDelete("task", entry)
+                                }
                             }
                         }
                     }

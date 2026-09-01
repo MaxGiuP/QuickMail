@@ -32,15 +32,17 @@ ToolButton {
         id: spinAnimation
         target: iconContent
         property: "rotation"
-        running: root.spinning
+        running: root.spinning && Theme.animationsEnabled
         from: 0
         to: 360
         duration: 900
         loops: Animation.Infinite
-        onStopped: if (!root.spinning) iconContent.rotation = 0
+        onStopped: if (!root.spinning || !Theme.animationsEnabled)
+            iconContent.rotation = 0
     }
 
-    onSpinningChanged: if (!spinning) iconContent.rotation = 0
+    onSpinningChanged: if (!spinning || !Theme.animationsEnabled)
+        iconContent.rotation = 0
 
     background: Rectangle {
         radius: Theme.radiusSmall
@@ -48,6 +50,11 @@ ToolButton {
             : root.hovered || root.visualFocus ? Theme.surfaceHover : "transparent"
         border.width: root.visualFocus ? 1 : 0
         border.color: Theme.accent
+
+        Behavior on color {
+            enabled: Theme.animationsEnabled
+            ColorAnimation { duration: Theme.motionFast }
+        }
     }
 
     ToolTip.visible: hovered && tip !== ""
