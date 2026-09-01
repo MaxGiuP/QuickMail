@@ -23,6 +23,7 @@ Item {
             if (!AppSettings.ready || root.changed) return
             root.changed = true
             AppSettings.allowRemoteContent = false
+            AppSettings.compactMessageList = true
             finishTimer.start()
         }
     }

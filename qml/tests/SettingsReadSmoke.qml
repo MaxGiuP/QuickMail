@@ -25,6 +25,10 @@ Item {
                 root.fail("the effective remote-content policy ignored the saved opt-out")
                 return
             }
+            if (AppSettings.compactMessageList !== true) {
+                root.fail("compact message-list preference did not survive a new process")
+                return
+            }
             Qt.quit()
         }
     }

@@ -16,6 +16,10 @@ Rectangle {
     property bool htmlRenderFailed: false
     property bool htmlRenderReady: false
     property int htmlRenderGeneration: 0
+    readonly property bool settingsMenuVisible: readerSettings.visible
+    readonly property int settingsMenuItemCount: readerSettings.count
+    readonly property bool compactSettingChecked: compactMessageListSetting.checked
+    readonly property bool composeFormattingSettingChecked: composeFormattingSetting.checked
     readonly property bool threadAvatarLayoutReady: _threadAvatarLayoutReady
     property bool _threadAvatarLayoutReady: false
     property int _threadAvatarLayoutGeneration: 0
@@ -83,6 +87,11 @@ Rectangle {
     function addressList(value) {
         if (!Array.isArray(value)) return String(value || "")
         return value.map(entry => entry.name || entry.address || "").filter(Boolean).join(", ")
+    }
+
+    function toggleReaderSettings() {
+        if (readerSettings.visible) readerSettings.close()
+        else readerSettings.open()
     }
 
     function threadSender(item) {
@@ -215,19 +224,40 @@ Rectangle {
                 onClicked: store.trash(root.message)
             }
             IconButton {
+                objectName: "readerSettingsButton"
                 iconName: "settings"
-                tip: "Reader settings"
-                onClicked: readerSettings.open()
+                tip: "QuickMail settings"
+                onClicked: root.toggleReaderSettings()
 
                 Menu {
                     id: readerSettings
+                    objectName: "readerSettingsMenu"
                     x: parent.width - width
                     y: parent.height
+                    closePolicy: Popup.CloseOnEscape
+                        | Popup.CloseOnPressOutsideParent
                     MenuItem {
+                        objectName: "remoteContentSetting"
                         text: "Load remote content"
                         checkable: true
                         checked: AppSettings.allowRemoteContent
                         onTriggered: AppSettings.allowRemoteContent = checked
+                    }
+                    MenuItem {
+                        id: compactMessageListSetting
+                        objectName: "compactMessageListSetting"
+                        text: "Compact message list"
+                        checkable: true
+                        checked: AppSettings.compactMessageList
+                        onTriggered: AppSettings.compactMessageList = checked
+                    }
+                    MenuItem {
+                        id: composeFormattingSetting
+                        objectName: "composeFormattingSetting"
+                        text: "Show compose formatting tools"
+                        checkable: true
+                        checked: AppSettings.composeFormattingExpanded
+                        onTriggered: AppSettings.composeFormattingExpanded = checked
                     }
                 }
             }

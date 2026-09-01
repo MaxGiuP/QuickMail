@@ -8,6 +8,7 @@ Singleton {
     id: root
 
     property alias allowRemoteContent: settingsAdapter.allowRemoteContent
+    property alias compactMessageList: settingsAdapter.compactMessageList
     property alias composeFormattingExpanded: settingsAdapter.composeFormattingExpanded
     readonly property bool ready: internal.ready
     // Loading a persisted opt-out is asynchronous. Keep every network-backed
@@ -61,6 +62,9 @@ Singleton {
             // Keep the familiar mail-client behaviour by default. People who
             // prefer stricter privacy can disable it from the reader menu.
             property bool allowRemoteContent: true
+            // Compact rows are optional so message previews remain visible by
+            // default while denser inboxes are one click away.
+            property bool compactMessageList: false
             // The composer keeps its richer controls visible by default, but
             // the compact state is remembered when screen space matters more.
             property bool composeFormattingExpanded: true

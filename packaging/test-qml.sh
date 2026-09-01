@@ -26,7 +26,7 @@ find "$project_dir/qml" -name '*.qml' -print0 \
 cp -R "$project_dir/qml/." "$test_runtime_dir/"
 cp "$project_dir/qml/tests/SmokeHarness.qml" "$test_runtime_dir/shell.qml"
 
-for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke NavigationHierarchySmoke
+for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke SettingsMenuSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke NavigationHierarchySmoke
 do
   smoke_log=$(mktemp "${TMPDIR:-/tmp}/quickmail-qml-smoke.XXXXXX")
   smoke_timezone=${TZ:-UTC}
@@ -42,7 +42,7 @@ do
     exit 1
   fi
 
-  if grep -Eq 'QML SMOKE TEST FAILED|UI SMOKE TEST FAILED|STORE CONTRACT TEST FAILED|PLAIN TEXT SECURITY TEST FAILED|HTML RENDER TEST FAILED|MESSAGE TEXT LAYOUT TEST FAILED|SENDER AVATAR TEST FAILED|READER AVATAR LAZY TEST FAILED|WINDOW LIFECYCLE TEST FAILED|COMPOSE FORMATTING TEST FAILED|SETTINGS PERSISTENCE TEST FAILED|CALENDAR PANE TEST FAILED|Binding loop detected|Type .* unavailable|Cannot assign to non-existent|ReferenceError:|is not defined|Failed to load component|Failed to load configuration' "$smoke_log"; then
+  if grep -Eq 'QML SMOKE TEST FAILED|UI SMOKE TEST FAILED|STORE CONTRACT TEST FAILED|PLAIN TEXT SECURITY TEST FAILED|HTML RENDER TEST FAILED|MESSAGE TEXT LAYOUT TEST FAILED|SETTINGS MENU TEST FAILED|SENDER AVATAR TEST FAILED|READER AVATAR LAZY TEST FAILED|WINDOW LIFECYCLE TEST FAILED|COMPOSE FORMATTING TEST FAILED|SETTINGS PERSISTENCE TEST FAILED|CALENDAR PANE TEST FAILED|Binding loop detected|Type .* unavailable|Cannot assign to non-existent|ReferenceError:|is not defined|Failed to load component|Failed to load configuration' "$smoke_log"; then
     cat "$smoke_log" >&2
     rm -f "$smoke_log"
     exit 1
