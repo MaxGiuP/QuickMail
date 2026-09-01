@@ -15,6 +15,13 @@ Dialog {
     property string errorText: ""
     readonly property bool selectedTaskDateOnly: entryKind === "task"
         && root.destinationUsesDateOnlyTasks(root.selectedDestination())
+    readonly property real contentLayoutWidth: contentLayout.width
+    readonly property real contentLayoutHeight: contentLayout.height
+    readonly property real formViewportWidth: formScroll.availableWidth
+    readonly property real formContentWidth: formScroll.contentWidth
+    readonly property real formX: formLayout.x
+    readonly property real formWidth: formLayout.width
+    readonly property real titleInputWidth: titleField.width
 
     signal payloadReady(string kind, var payload)
 
@@ -219,6 +226,8 @@ Dialog {
     }
 
     contentItem: ColumnLayout {
+        id: contentLayout
+
         spacing: 0
 
         RowLayout {
@@ -276,13 +285,18 @@ Dialog {
         }
 
         ScrollView {
+            id: formScroll
+
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            contentWidth: availableWidth
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width: Math.max(0, parent.width - 28)
+                id: formLayout
+
+                width: Math.max(0, formScroll.availableWidth - 28)
                 x: 14
                 spacing: 12
 
