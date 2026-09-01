@@ -19,8 +19,8 @@ Rectangle {
     readonly property bool starred: message.starred === true || message.is_starred === true
     readonly property int conversationCount: Number(message.conversationCount || 1)
     readonly property bool threaded: conversationCount > 1
-    readonly property string conversationLabel: conversationCount
-        + (conversationCount === 1 ? " message" : " messages")
+    readonly property string conversationLabel:
+        AgendaTranslations.tr("%n message(s)", conversationCount)
     readonly property string sender: singleLine(Array.isArray(message.conversationSenders)
         ? conversationSenderLabel(message.conversationSenders)
         : message.from_name || message.sender_name
@@ -35,11 +35,14 @@ Rectangle {
 
     Accessible.role: Accessible.ListItem
     Accessible.selected: selected
-    Accessible.name: (unread ? "Unread, " : "") + sender + ", " + subject
-        + (threaded ? ", conversation thread, at least " + conversationLabel : "")
+    Accessible.name: (unread ? AgendaTranslations.tr("Unread") + ", " : "")
+        + sender + ", " + subject
+        + (threaded ? ", " + AgendaTranslations.tr(
+            "conversation thread, at least %1").arg(conversationLabel) : "")
     Accessible.description: threaded
-        ? "Conversation thread with at least " + conversationLabel
-        : "Single message"
+        ? AgendaTranslations.tr("Conversation thread with at least %1")
+            .arg(conversationLabel)
+        : AgendaTranslations.tr("Single message")
     Accessible.onPressAction: root.activated()
 
     function singleLine(value) {
@@ -207,7 +210,8 @@ Rectangle {
                     border.color: root.unread ? Theme.accent : Theme.border
 
                     Accessible.role: Accessible.StaticText
-                    Accessible.name: "Conversation thread, " + root.conversationLabel
+                    Accessible.name: AgendaTranslations.tr("Conversation thread, %1")
+                        .arg(root.conversationLabel)
 
                     Row {
                         id: threadBadgeContent
@@ -224,7 +228,8 @@ Rectangle {
                         Text {
                             objectName: "messageRowThreadBadgeText"
                             text: root.compact ? String(root.conversationCount)
-                                : "THREAD · " + root.conversationCount
+                                : AgendaTranslations.tr("THREAD · %1")
+                                    .arg(root.conversationCount)
                             textFormat: Text.PlainText
                             color: root.unread ? Theme.accent : Theme.textSecondary
                             font.family: Theme.fontFamily

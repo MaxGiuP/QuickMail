@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import "../components"
+import ".."
 
 ApplicationWindow {
     id: window
@@ -35,6 +36,8 @@ ApplicationWindow {
         timestamp: "2026-09-01T10:00:00Z",
         read: false
     }]
+
+    Component.onCompleted: AgendaTranslations.localeOverride = "en_GB"
 
     function expect(condition, message) {
         if (condition) return
@@ -251,6 +254,23 @@ ApplicationWindow {
                     && positions.length === 1
                     && window.textContains(positions[0], "3+"),
                 "a truncated timeline presented its bounded count as exact")
+            AgendaTranslations.localeOverride = "de_DE"
+            window.expect(AgendaTranslations.tr("%n message(s)", 3)
+                    === "3 Nachrichten"
+                    && AgendaTranslations.tr("Conversation thread")
+                        === "E-Mail-Unterhaltung"
+                    && AgendaTranslations.tr("%1 of %2").arg(2).arg(3)
+                        === "2 von 3",
+                "German conversation-thread translations are incomplete")
+            AgendaTranslations.localeOverride = "it_IT"
+            window.expect(AgendaTranslations.tr("%n message(s)", 3)
+                    === "3 messaggi"
+                    && AgendaTranslations.tr("Conversation thread")
+                        === "Conversazione email"
+                    && AgendaTranslations.tr("%1 of %2").arg(2).arg(3)
+                        === "2 di 3",
+                "Italian conversation-thread translations are incomplete")
+            AgendaTranslations.localeOverride = ""
             Qt.quit()
         }
     }

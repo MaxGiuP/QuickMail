@@ -304,16 +304,21 @@ Rectangle {
 
     function threadMessageCountLabel() {
         const count = root.knownThreadCount
-        const suffix = store.threadTruncated ? "+" : ""
-        return count + suffix + (count === 1 ? " message" : " messages")
+        let label = AgendaTranslations.tr("%n message(s)", count)
+        if (store.threadTruncated)
+            label = label.replace(String(count), String(count) + "+")
+        return label
     }
 
     function threadBannerDetail() {
         if (store.threadLoading && root.threadCount < root.knownThreadCount)
-            return "Loading conversation · " + root.threadMessageCountLabel() + "…"
+            return AgendaTranslations.tr("Loading conversation · %1…")
+                .arg(root.threadMessageCountLabel())
         const senders = root.threadSenderCount
-        return "Conversation · " + root.threadMessageCountLabel()
-            + (senders > 1 ? " · " + senders + " senders" : "")
+        return AgendaTranslations.tr("Conversation · %1")
+            .arg(root.threadMessageCountLabel())
+            + (senders > 1
+                ? AgendaTranslations.tr(" · %n sender(s)", senders) : "")
     }
 
     function humanSize(value) {
@@ -597,7 +602,8 @@ Rectangle {
                         border.color: Theme.accent
 
                         Accessible.role: Accessible.StaticText
-                        Accessible.name: "Conversation thread, " + root.threadBannerDetail()
+                        Accessible.name: AgendaTranslations.tr("Conversation thread, %1")
+                            .arg(root.threadBannerDetail())
 
                         RowLayout {
                             anchors.fill: parent
@@ -617,7 +623,7 @@ Rectangle {
                                 spacing: 0
 
                                 Text {
-                                    text: "Conversation thread"
+                                    text: AgendaTranslations.tr("Conversation thread")
                                     textFormat: Text.PlainText
                                     color: Theme.accentSoftText
                                     font.family: Theme.fontFamily
@@ -657,9 +663,14 @@ Rectangle {
                             required property int index
                             readonly property bool selectedMessage: root.threadSelected(modelData)
                             readonly property bool unreadMessage: root.threadUnread(modelData)
-                            readonly property string positionLabel: (index + 1) + " of "
-                                + (store.threadTruncated ? root.knownThreadCount + "+"
-                                    : root.knownThreadCount)
+                            readonly property string displayTotal: store.threadTruncated
+                                ? root.knownThreadCount + "+" : String(root.knownThreadCount)
+                            readonly property string accessibleTotal: store.threadTruncated
+                                ? AgendaTranslations.tr("at least %1").arg(root.knownThreadCount)
+                                : String(root.knownThreadCount)
+                            readonly property string positionLabel:
+                                AgendaTranslations.tr("%1 of %2").arg(index + 1)
+                                    .arg(displayTotal)
                             readonly property bool hasFinalLayoutGeometry:
                                 root.threadAvatarLayoutReady
                                 && threadSection.visible
@@ -699,11 +710,13 @@ Rectangle {
 
                             Accessible.role: Accessible.ListItem
                             Accessible.selected: selectedMessage
-                            Accessible.name: "Message " + (index + 1) + " of "
-                                + (store.threadTruncated ? "at least " : "")
-                                + root.knownThreadCount + " from " + root.threadSender(modelData)
+                            Accessible.name: AgendaTranslations.tr("Message %1 of %2 from %3")
+                                .arg(index + 1).arg(accessibleTotal)
+                                .arg(root.threadSender(modelData))
                             Accessible.description: selectedMessage
-                                ? "Current open message" : unreadMessage ? "Unread message" : "Read message"
+                                ? AgendaTranslations.tr("Current open message")
+                                : unreadMessage ? AgendaTranslations.tr("Unread message")
+                                    : AgendaTranslations.tr("Read message")
 
                             Behavior on color {
                                 ColorAnimation { duration: 140 }
@@ -834,7 +847,7 @@ Rectangle {
 
                                         Text {
                                             anchors.centerIn: parent
-                                            text: "OPEN"
+                                            text: AgendaTranslations.tr("OPEN")
                                             textFormat: Text.PlainText
                                             color: Theme.accentText
                                             font.family: Theme.fontFamily
@@ -882,7 +895,7 @@ Rectangle {
 
                     Text {
                         visible: store.threadTruncated
-                        text: "Showing a 100-message window that keeps your selected message"
+                        text: AgendaTranslations.tr("Showing a 100-message window that keeps your selected message")
                         textFormat: Text.PlainText
                         color: Theme.textMuted
                         font.family: Theme.fontFamily
