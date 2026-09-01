@@ -25,6 +25,7 @@ Item {
             AppSettings.allowRemoteContent = false
             AppSettings.compactMessageList = true
             AppSettings.readerZoomPercent = 130
+            AppSettings.themeMode = "light"
             AppSettings.useThemeEmailColors = false
             finishTimer.start()
         }

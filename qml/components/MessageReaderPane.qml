@@ -26,6 +26,8 @@ Rectangle {
     readonly property int settingsMenuItemCount: readerSettings.count
     readonly property bool compactSettingChecked: compactMessageListSetting.checked
     readonly property bool composeFormattingSettingChecked: composeFormattingSetting.checked
+    readonly property bool darkModeSettingChecked: darkModeSetting.checked
+    readonly property bool systemThemeSettingChecked: systemThemeSetting.checked
     readonly property int minimumZoomPercent: 50
     readonly property int maximumZoomPercent: 200
     readonly property int zoomStepPercent: 10
@@ -496,6 +498,24 @@ Rectangle {
                         checkable: true
                         checked: AppSettings.composeFormattingExpanded
                         onTriggered: AppSettings.composeFormattingExpanded = checked
+                    }
+                    MenuSeparator {}
+                    MenuItem {
+                        id: systemThemeSetting
+                        objectName: "systemThemeSetting"
+                        text: AgendaTranslations.tr("Follow system theme")
+                        checkable: true
+                        checked: Theme.followsSystemTheme
+                        onTriggered: AppSettings.themeMode = checked ? "system"
+                            : Theme.darkMode ? "dark" : "light"
+                    }
+                    MenuItem {
+                        id: darkModeSetting
+                        objectName: "darkModeSetting"
+                        text: AgendaTranslations.tr("Dark mode")
+                        checkable: true
+                        checked: Theme.darkMode
+                        onTriggered: AppSettings.themeMode = checked ? "dark" : "light"
                     }
                     MenuSeparator {}
                     MenuItem {

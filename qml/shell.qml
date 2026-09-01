@@ -8,6 +8,14 @@ ShellRoot {
 
     property var attachmentSaveCallback: null
 
+    Binding {
+        target: Application.styleHints
+        property: "colorScheme"
+        value: Theme.followsSystemTheme ? Qt.Unknown
+            : Theme.darkMode ? Qt.Dark : Qt.Light
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+
     RpcClient { id: rpc }
     MailStore {
         id: store

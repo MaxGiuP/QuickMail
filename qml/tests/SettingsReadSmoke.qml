@@ -33,6 +33,10 @@ Item {
                 root.fail("reader zoom did not survive a new process")
                 return
             }
+            if (AppSettings.themeMode !== "light") {
+                root.fail("theme preference did not survive a new process")
+                return
+            }
             if (AppSettings.useThemeEmailColors !== false) {
                 root.fail("original-colour preference did not survive a new process")
                 return

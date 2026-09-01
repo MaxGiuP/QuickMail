@@ -11,6 +11,7 @@ Singleton {
     property alias compactMessageList: settingsAdapter.compactMessageList
     property alias composeFormattingExpanded: settingsAdapter.composeFormattingExpanded
     property alias readerZoomPercent: settingsAdapter.readerZoomPercent
+    property alias themeMode: settingsAdapter.themeMode
     property alias useThemeEmailColors: settingsAdapter.useThemeEmailColors
     readonly property bool ready: internal.ready
     // Loading a persisted opt-out is asynchronous. Keep every network-backed
@@ -77,6 +78,9 @@ Singleton {
             // Reader zoom is shared across messages so switching mail never
             // unexpectedly changes the user's preferred reading size.
             property int readerZoomPercent: 100
+            // Follow the desktop until the user explicitly selects a local
+            // light or dark appearance for QuickMail.
+            property string themeMode: "system"
             // Matching the application palette is the safe, readable default;
             // original sender colors remain available from QuickMail settings.
             property bool useThemeEmailColors: true

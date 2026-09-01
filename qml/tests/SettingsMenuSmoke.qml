@@ -11,6 +11,7 @@ ApplicationWindow {
     height: 480
     color: Theme.canvas
     property bool originalCompact: false
+    property string originalThemeMode: "system"
 
     function expect(condition, message) {
         if (condition) return
@@ -65,6 +66,7 @@ ApplicationWindow {
         repeat: false
         onTriggered: {
             window.originalCompact = AppSettings.compactMessageList
+            window.originalThemeMode = AppSettings.themeMode
             const button = window.named(reader, "readerSettingsButton")
             window.expect(button !== null, "settings button was not created")
             if (!button) return
@@ -80,7 +82,7 @@ ApplicationWindow {
         onTriggered: {
             window.expect(reader.settingsMenuVisible,
                 "first settings-button click did not open the menu")
-            window.expect(reader.settingsMenuItemCount >= 3,
+            window.expect(reader.settingsMenuItemCount >= 9,
                 "expanded settings menu is missing options")
             AppSettings.compactMessageList = !window.originalCompact
             window.expect(reader.compactSettingChecked === !window.originalCompact,
@@ -88,6 +90,13 @@ ApplicationWindow {
             window.expect(reader.composeFormattingSettingChecked
                     === AppSettings.composeFormattingExpanded,
                 "compose formatting setting was not bound to preferences")
+            AppSettings.themeMode = "dark"
+            window.expect(reader.darkModeSettingChecked
+                    && !reader.systemThemeSettingChecked,
+                "dark-mode override was not reflected in the settings menu")
+            AppSettings.themeMode = "system"
+            window.expect(reader.systemThemeSettingChecked,
+                "system-theme default was not reflected in the settings menu")
             window.named(reader, "readerSettingsButton").clicked()
             closedCheck.start()
         }
@@ -101,6 +110,7 @@ ApplicationWindow {
             window.expect(!reader.settingsMenuVisible,
                 "second settings-button click did not close the menu")
             AppSettings.compactMessageList = window.originalCompact
+            AppSettings.themeMode = window.originalThemeMode
             Qt.quit()
         }
     }
