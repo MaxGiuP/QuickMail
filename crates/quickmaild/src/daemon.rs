@@ -45,62 +45,74 @@ const EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const SYNC_PAGE_SIZE: u32 = 200;
 const SYNC_FLAG_RECONCILE_SIZE: u32 = 64;
+const MAX_SAFE_STYLESHEET_BYTES: usize = 256 * 1024;
+
+const SAFE_CSS_PROPERTIES: &[&str] = &[
+    "background-color",
+    "border",
+    "border-bottom",
+    "border-bottom-color",
+    "border-bottom-style",
+    "border-bottom-width",
+    "border-collapse",
+    "border-color",
+    "border-left",
+    "border-left-color",
+    "border-left-style",
+    "border-left-width",
+    "border-right",
+    "border-right-color",
+    "border-right-style",
+    "border-right-width",
+    "border-style",
+    "border-top",
+    "border-top-color",
+    "border-top-style",
+    "border-top-width",
+    "border-width",
+    "color",
+    "float",
+    "font",
+    "font-family",
+    "font-kerning",
+    "font-size",
+    "font-style",
+    "font-variant",
+    "font-weight",
+    "line-height",
+    "margin-bottom",
+    "margin-left",
+    "margin-right",
+    "margin-top",
+    "padding",
+    "padding-bottom",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "text-decoration",
+    "text-indent",
+    "text-transform",
+    "vertical-align",
+    "white-space",
+    "word-spacing",
+];
 
 static HTML_SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
     let mut builder = ammonia::Builder::default();
     builder
         .url_schemes(HashSet::from(["http", "https", "mailto"]))
         .url_relative(ammonia::UrlRelative::Deny)
-        .add_generic_attributes(&["style"])
-        .filter_style_properties(HashSet::from([
-            "background-color",
-            "border",
-            "border-bottom",
-            "border-bottom-color",
-            "border-bottom-style",
-            "border-bottom-width",
-            "border-collapse",
-            "border-color",
-            "border-left",
-            "border-left-color",
-            "border-left-style",
-            "border-left-width",
-            "border-right",
-            "border-right-color",
-            "border-right-style",
-            "border-right-width",
-            "border-style",
-            "border-top",
-            "border-top-color",
-            "border-top-style",
-            "border-top-width",
-            "border-width",
-            "color",
-            "float",
-            "font",
-            "font-family",
-            "font-kerning",
-            "font-size",
-            "font-style",
-            "font-variant",
-            "font-weight",
-            "line-height",
-            "margin-bottom",
-            "margin-left",
-            "margin-right",
-            "margin-top",
-            "padding",
-            "padding-bottom",
-            "padding-left",
-            "padding-right",
-            "padding-top",
-            "text-decoration",
-            "text-indent",
-            "text-transform",
-            "vertical-align",
-            "white-space",
-            "word-spacing",
-        ]))
+        // Email templates commonly put presentation rules in `<head>` and
+        // background colors on `<body>`. Stylesheet text receives a separate
+        // strict declaration/selector pass in `sanitize_stylesheet_blocks`.
+        .add_tags(&["style"])
+        .rm_clean_content_tags(&["style"])
+        // `bgcolor` is still emitted by a large amount of table-based email
+        // HTML. It carries a color only (never a resource URL), so retaining
+        // it restores legacy message backgrounds without weakening the
+        // remote-content boundary.
+        .add_generic_attributes(&["style", "bgcolor", "class", "id", "data-ogsc", "data-ogsb"])
+        .filter_style_properties(SAFE_CSS_PROPERTIES.iter().copied().collect())
         .attribute_filter(|element, attribute, value| {
             if element == "img" && attribute == "src" {
                 let allowed = ammonia::Url::parse(value)
@@ -108,10 +120,38 @@ static HTML_SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
                     .unwrap_or(false);
                 return allowed.then(|| value.into());
             }
+            if attribute == "bgcolor" && !is_safe_legacy_color(value) {
+                return None;
+            }
+            if matches!(attribute, "class" | "id" | "data-ogsc" | "data-ogsb")
+                && (value.len() > 1024
+                    || value.bytes().any(|byte| {
+                        !(byte.is_ascii_alphanumeric()
+                            || matches!(
+                                byte,
+                                b'_' | b'-' | b'.' | b':' | b' ' | b'\t' | b'\r' | b'\n'
+                            ))
+                    }))
+            {
+                return None;
+            }
             Some(value.into())
         });
     builder
 });
+
+fn is_safe_legacy_color(value: &str) -> bool {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8)
+            && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+}
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
@@ -513,7 +553,7 @@ impl Daemon {
                 let params: AccountAddParams = decode(params)?;
                 validate_account_setup(&params)?;
                 let _mutation = self.account_mutations.lock().await;
-                if params.provider.eq_ignore_ascii_case("gmail") {
+                if let Some(requested_family) = brokered_provider_family(&params.provider) {
                     let requested_address = params.address.trim();
                     let existing = self
                         .database
@@ -522,7 +562,7 @@ impl Daemon {
                         .map_err(storage_rpc_error)?
                         .into_iter()
                         .find(|account| {
-                            account.provider.eq_ignore_ascii_case("gmail")
+                            brokered_provider_family(&account.provider) == Some(requested_family)
                                 && account
                                     .address
                                     .trim()
@@ -693,17 +733,28 @@ impl Daemon {
                     .map_err(storage_rpc_error)?;
                 encode(message)
             }
+            method::THREAD_GET => {
+                let params: MessageIdParams = decode(params)?;
+                let conversation = self
+                    .database
+                    .get_thread(&params.message_id)
+                    .await
+                    .map_err(storage_rpc_error)?;
+                encode(conversation)
+            }
             method::MAIL_ACTION => {
                 let action: MailAction = decode(params)?;
-                let (operation_id, revision) = self
+                let (operation_id, _queued_revision) = self
                     .database
                     .apply_mail_action(&action)
                     .await
                     .map_err(storage_rpc_error)?;
-                let provider_result = self.apply_provider_action(action).await;
-                self.database
-                    .finish_operation(
+                let provider_result = self.apply_provider_action(action.clone()).await;
+                let revision = self
+                    .database
+                    .finish_mail_action(
                         &operation_id,
+                        &action,
                         provider_result
                             .as_ref()
                             .map(|_| ())
@@ -1106,7 +1157,7 @@ impl Daemon {
             .map_err(|error| {
                 ProviderError::Other(format!("could not read mailbox sync state: {error}"))
             })?;
-        let reconcile_message_ids = self
+        let mut reconcile_message_ids = self
             .database
             .list_messages(&MessageQuery {
                 account_id: Some(mailbox.account_id.clone()),
@@ -1121,7 +1172,28 @@ impl Daemon {
             .messages
             .into_iter()
             .map(|message| message.id)
-            .collect();
+            .collect::<Vec<_>>();
+        // Older caches predate thread metadata. Feed a separate, bounded
+        // progressive batch to providers that can reconcile known IDs so
+        // those rows eventually join conversations without clearing mail.
+        let backfill_ids = self
+            .database
+            .thread_metadata_backfill_ids(
+                &mailbox.account_id,
+                &mailbox.id,
+                SYNC_FLAG_RECONCILE_SIZE,
+            )
+            .await
+            .map_err(|error| {
+                ProviderError::Other(format!(
+                    "could not read thread metadata backfill page: {error}"
+                ))
+            })?;
+        for message_id in backfill_ids {
+            if !reconcile_message_ids.contains(&message_id) {
+                reconcile_message_ids.push(message_id);
+            }
+        }
         let page = provider
             .sync_mailbox(MailboxSyncQuery {
                 account_id: mailbox.account_id.clone(),
@@ -1403,7 +1475,301 @@ fn sanitize_message_html(message: &mut quickmail_core::Message) {
 }
 
 fn sanitize_html_body(html: &str) -> String {
-    HTML_SANITIZER.clean(html).to_string()
+    let wrapped = preserve_body_presentation(html);
+    let cleaned = HTML_SANITIZER.clean(&wrapped).to_string();
+    sanitize_stylesheet_blocks(&cleaned)
+}
+
+fn preserve_body_presentation(html: &str) -> String {
+    let Some(start) = find_ascii_case_insensitive(html, "<body", 0) else {
+        return html.to_owned();
+    };
+    let Some(open_end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+        return html.to_owned();
+    };
+    let Some(close_start) = find_ascii_case_insensitive(html, "</body", open_end) else {
+        return html.to_owned();
+    };
+    let Some(close_end) = html[close_start..]
+        .find('>')
+        .map(|offset| close_start + offset + 1)
+    else {
+        return html.to_owned();
+    };
+    let opening = &html[start..open_end];
+    let classes = extract_html_attribute(opening, "class")
+        .filter(|value| {
+            value.len() <= 512
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b'-' | b' ' | b'\t' | b'\r' | b'\n')
+                })
+        })
+        .unwrap_or_default();
+    let mut style = extract_html_attribute(opening, "style")
+        .filter(|value| value.len() <= 16 * 1024)
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(color) = extract_html_attribute(opening, "bgcolor").filter(|value| {
+        is_safe_legacy_color(value) && !style.to_ascii_lowercase().contains("background-color")
+    }) {
+        if !style.trim().is_empty() && !style.trim_end().ends_with(';') {
+            style.push(';');
+        }
+        style.push_str("background-color:");
+        style.push_str(color.trim());
+    }
+
+    let mut output = String::with_capacity(html.len() + 64);
+    output.push_str(&html[..start]);
+    output.push_str("<div class=\"quickmail-body");
+    if !classes.trim().is_empty() {
+        output.push(' ');
+        output.push_str(&escape_html_attribute(classes.trim()));
+    }
+    output.push('"');
+    if !style.trim().is_empty() {
+        output.push_str(" style=\"");
+        output.push_str(&escape_html_attribute(style.trim()));
+        output.push('"');
+    }
+    output.push('>');
+    output.push_str(&html[open_end..close_start]);
+    output.push_str("</div>");
+    output.push_str(&html[close_end..]);
+    output
+}
+
+fn extract_html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let bytes = tag.as_bytes();
+    let name = name.as_bytes();
+    let mut cursor = 0;
+    while cursor + name.len() <= bytes.len() {
+        let offset = bytes[cursor..]
+            .windows(name.len())
+            .position(|window| window.eq_ignore_ascii_case(name))?;
+        let start = cursor + offset;
+        let before_ok =
+            start == 0 || bytes[start - 1].is_ascii_whitespace() || bytes[start - 1] == b'<';
+        let mut position = start + name.len();
+        let after_ok = position == bytes.len()
+            || bytes[position].is_ascii_whitespace()
+            || matches!(bytes[position], b'=' | b'>' | b'/');
+        if !before_ok || !after_ok {
+            cursor = start + name.len();
+            continue;
+        }
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        if bytes.get(position) != Some(&b'=') {
+            cursor = start + name.len();
+            continue;
+        }
+        position += 1;
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        let quote = bytes.get(position).copied();
+        if matches!(quote, Some(b'"' | b'\'')) {
+            position += 1;
+            let end = bytes[position..]
+                .iter()
+                .position(|byte| Some(*byte) == quote)?
+                + position;
+            return Some(&tag[position..end]);
+        }
+        let end = bytes[position..]
+            .iter()
+            .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+            .map_or(bytes.len(), |offset| position + offset);
+        return (end > position).then(|| &tag[position..end]);
+    }
+    None
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn sanitize_stylesheet_blocks(html: &str) -> String {
+    let mut output = String::with_capacity(html.len());
+    let mut cursor = 0;
+    while let Some(start) = find_ascii_case_insensitive(html, "<style", cursor) {
+        output.push_str(&html[cursor..start]);
+        let Some(open_end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+            return output;
+        };
+        let Some(close_start) = find_ascii_case_insensitive(html, "</style", open_end) else {
+            return output;
+        };
+        let Some(close_end) = html[close_start..]
+            .find('>')
+            .map(|offset| close_start + offset + 1)
+        else {
+            return output;
+        };
+        let stylesheet = sanitize_stylesheet(&html[open_end..close_start]);
+        if !stylesheet.is_empty() {
+            output.push_str("<style>");
+            output.push_str(&stylesheet);
+            output.push_str("</style>");
+        }
+        cursor = close_end;
+    }
+    output.push_str(&html[cursor..]);
+    output
+}
+
+fn sanitize_stylesheet(input: &str) -> String {
+    if input.len() > MAX_SAFE_STYLESHEET_BYTES || input.contains("/*") || input.contains("*/") {
+        return String::new();
+    }
+    let mut output = String::new();
+    let mut cursor = 0;
+    for _ in 0..2048 {
+        let Some(open_offset) = input[cursor..].find('{') else {
+            break;
+        };
+        let open = cursor + open_offset;
+        let Some(close_offset) = input[open + 1..].find('}') else {
+            break;
+        };
+        let close = open + 1 + close_offset;
+        let selector = normalize_email_selector(input[cursor..open].trim());
+        let declarations = &input[open + 1..close];
+        let sanitized = sanitize_css_declarations(declarations);
+        if safe_css_selector(&selector) && !sanitized.is_empty() {
+            let rule_length = selector
+                .len()
+                .saturating_add(sanitized.len())
+                .saturating_add(2);
+            if output.len().saturating_add(rule_length) > MAX_SAFE_STYLESHEET_BYTES {
+                break;
+            }
+            output.push_str(&selector);
+            output.push('{');
+            output.push_str(&sanitized);
+            output.push('}');
+        }
+        cursor = close + 1;
+    }
+    output
+}
+
+fn normalize_email_selector(selector: &str) -> String {
+    let mut output = String::with_capacity(selector.len() + 16);
+    let bytes = selector.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if cursor + 4 <= bytes.len()
+            && bytes[cursor..cursor + 4].eq_ignore_ascii_case(b"body")
+            && (cursor == 0
+                || !(bytes[cursor - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[cursor - 1], b'_' | b'-')))
+            && (cursor + 4 == bytes.len()
+                || !(bytes[cursor + 4].is_ascii_alphanumeric()
+                    || matches!(bytes[cursor + 4], b'_' | b'-')))
+        {
+            output.push_str(".quickmail-body");
+            cursor += 4;
+        } else {
+            let character = selector[cursor..].chars().next().unwrap();
+            output.push(character);
+            cursor += character.len_utf8();
+        }
+    }
+    output
+}
+
+fn sanitize_css_declarations(input: &str) -> String {
+    let mut kept = Vec::new();
+    for declaration in input.split(';').take(256) {
+        let Some((property, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let property = property.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if !SAFE_CSS_PROPERTIES.contains(&property.as_str()) || !safe_css_value(value) {
+            continue;
+        }
+        kept.push(format!("{property}:{value}"));
+    }
+    kept.join(";")
+}
+
+fn safe_css_selector(selector: &str) -> bool {
+    !selector.is_empty()
+        && selector.len() <= 1024
+        && selector.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'_' | b'#'
+                        | b'.'
+                        | b'*'
+                        | b','
+                        | b':'
+                        | b'>'
+                        | b'+'
+                        | b'~'
+                        | b'['
+                        | b']'
+                        | b'('
+                        | b')'
+                        | b'='
+                        | b'"'
+                        | b'\''
+                        | b'-'
+                        | b' '
+                        | b'\t'
+                        | b'\r'
+                        | b'\n'
+                )
+        })
+}
+
+fn safe_css_value(value: &str) -> bool {
+    if value.is_empty() || value.len() > 2048 {
+        return false;
+    }
+    if value.bytes().any(|byte| {
+        byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r' | b'\n')
+            || matches!(byte, b'&' | b'\\' | b'<' | b'>' | b'{' | b'}' | b'@')
+    }) {
+        return false;
+    }
+    let compact = value
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    ![
+        "url(",
+        "image-set(",
+        "cross-fade(",
+        "expression(",
+        "javascript:",
+        "-moz-binding",
+    ]
+    .iter()
+    .any(|forbidden| compact.contains(forbidden))
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || from > haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+        .map(|offset| from + offset)
 }
 
 fn validate_account_setup(setup: &AccountAddParams) -> Result<(), RpcError> {
@@ -1412,8 +1778,8 @@ fn validate_account_setup(setup: &AccountAddParams) -> Result<(), RpcError> {
             "provider and address are required",
         ));
     }
-    let is_gmail = setup.provider.eq_ignore_ascii_case("gmail");
-    if !is_gmail && (setup.imap.is_none() || setup.smtp.is_none()) {
+    let is_brokered = brokered_provider_family(&setup.provider).is_some();
+    if !is_brokered && (setup.imap.is_none() || setup.smtp.is_none()) {
         return Err(RpcError::invalid_params(
             "account setup requires both imap and smtp settings",
         ));
@@ -1431,8 +1797,8 @@ fn validate_account_setup(setup: &AccountAddParams) -> Result<(), RpcError> {
 }
 
 fn nonsecret_account_config(setup: &AccountAddParams) -> Value {
-    if setup.provider.eq_ignore_ascii_case("gmail") {
-        return json!({"provider": "gmail"});
+    if brokered_provider_family(&setup.provider).is_some() {
+        return json!({"provider": setup.provider.trim().to_ascii_lowercase()});
     }
     json!({
         "provider": setup.provider,
@@ -1445,6 +1811,19 @@ fn nonsecret_account_config(setup: &AccountAddParams) -> Value {
             "username": server.username,
         })),
     })
+}
+
+fn brokered_provider_family(provider: &str) -> Option<&'static str> {
+    if provider.eq_ignore_ascii_case("gmail") {
+        Some("gmail")
+    } else if ["outlook", "hotmail", "microsoft365"]
+        .iter()
+        .any(|candidate| provider.eq_ignore_ascii_case(candidate))
+    {
+        Some("microsoft")
+    } else {
+        None
+    }
 }
 
 fn validate_opaque_id(id: &str, name: &str) -> Result<(), RpcError> {
@@ -2489,21 +2868,38 @@ mod tests {
     #[test]
     fn received_html_uses_positive_resource_and_style_allowlists() {
         let cleaned = sanitize_html_body(
-            r#"<div onclick="bad()" style="color:red; background-image:url(file:///secret); font-weight:bold">
+            r##"<!doctype html><html><head>
+                <style>
+                    .mail-card { background-color:#123456; color:rgb(250, 240, 230);
+                        background-image:url(https://tracker.invalid/background.png) }
+                    @import url(https://tracker.invalid/import.css);
+                </style>
+                </head><body bgcolor="#f4f1ea" style="color:#202124">
+                <div class="mail-card" onclick="bad()" style="color:red; background-image:url(file:///secret); font-weight:bold">
                 <script>bad()</script>
                 <img src="https://images.example/pixel.png" onerror="bad()">
                 <img src="f&#x69;le:///home/person/private.png">
                 <a href="javascript:bad()">unsafe</a>
                 <a href="mailto:person@example.com">mail</a>
                 <a href="/relative">relative</a>
-            </div>"#,
+                <table bgcolor='#123456'><tr><td bgcolor="navy">colored</td></tr></table>
+                <div bgcolor="url(https://tracker.invalid)">invalid color</div>
+            </div></body></html>"##,
         );
 
         assert!(cleaned.contains("https://images.example/pixel.png"));
         assert_eq!(cleaned.matches("src=").count(), 1);
         assert!(cleaned.contains("color:red"));
         assert!(cleaned.contains("font-weight:bold"));
+        assert!(cleaned.contains(".mail-card{background-color:#123456;color:rgb(250, 240, 230)}"));
+        assert!(cleaned.contains("class=\"mail-card\""));
+        assert!(cleaned.contains("class=\"quickmail-body\""));
+        assert!(cleaned.contains("background-color:#f4f1ea"));
+        assert!(cleaned.contains("color:#202124"));
         assert!(cleaned.contains("mailto:person@example.com"));
+        assert!(cleaned.contains("bgcolor=\"#123456\""));
+        assert!(cleaned.contains("bgcolor=\"navy\""));
+        assert!(!cleaned.contains("bgcolor=\"url"));
         for forbidden in [
             "onclick",
             "onerror",
@@ -2511,10 +2907,28 @@ mod tests {
             "javascript:",
             "file:",
             "background-image",
+            "@import",
+            "tracker.invalid/background",
             "href=\"/relative\"",
         ] {
             assert!(!cleaned.contains(forbidden), "survived: {forbidden}");
         }
+    }
+
+    #[test]
+    fn stylesheet_expansion_stops_only_at_utf8_rule_boundaries() {
+        let selector = format!("{}body", "body,".repeat(50));
+        let rule = format!("{selector}{{font-family:é}}");
+        let mut stylesheet = String::new();
+        while stylesheet.len().saturating_add(rule.len()) <= MAX_SAFE_STYLESHEET_BYTES {
+            stylesheet.push_str(&rule);
+        }
+
+        let cleaned = sanitize_stylesheet(&stylesheet);
+        assert!(cleaned.len() <= MAX_SAFE_STYLESHEET_BYTES);
+        assert!(cleaned.is_char_boundary(cleaned.len()));
+        assert!(cleaned.contains('é'));
+        assert!(cleaned.ends_with('}'));
     }
 
     #[tokio::test]
@@ -2559,6 +2973,32 @@ mod tests {
         assert_eq!(result["revision"], revision);
         assert_eq!(result["existing"], true);
         assert_eq!(database.list_accounts().await.unwrap(), vec![account]);
+    }
+
+    #[test]
+    fn microsoft_broker_aliases_need_no_client_or_server_credentials() {
+        for provider in ["outlook", "hotmail", "microsoft365"] {
+            let setup: AccountAddParams = serde_json::from_value(json!({
+                "provider": provider,
+                "address": "person@example.com",
+                "displayName": "Person"
+            }))
+            .unwrap();
+            validate_account_setup(&setup).unwrap();
+            assert_eq!(
+                nonsecret_account_config(&setup),
+                json!({"provider": provider})
+            );
+            assert_eq!(brokered_provider_family(provider), Some("microsoft"));
+        }
+
+        let exchange: AccountAddParams = serde_json::from_value(json!({
+            "provider": "exchange",
+            "address": "person@company.example"
+        }))
+        .unwrap();
+        assert!(validate_account_setup(&exchange).is_err());
+        assert_eq!(brokered_provider_family("exchange"), None);
     }
 
     #[tokio::test]
@@ -2786,6 +3226,23 @@ mod tests {
             assert!(response.error.is_none(), "{:?}", response.error);
         }
 
+        let after_move = send_request(
+            &mut writer,
+            &mut reader,
+            json!({
+                "jsonrpc":"2.0","id":20,"method":"mail.list",
+                "params":{"accountId":"mock:demo@example.com","mailboxId":"mock-inbox","limit":50}
+            }),
+        )
+        .await;
+        assert!(after_move.error.is_none(), "{:?}", after_move.error);
+        assert!(
+            after_move.result.unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
         for id in [10, 11] {
             let fetched = send_request(
                 &mut writer,
@@ -2855,6 +3312,27 @@ mod tests {
         let daemon = Daemon::new(database.clone());
 
         daemon.sync_mailbox_page(&provider, &mailbox).await.unwrap();
+        let legacy = (0..70)
+            .map(|index| MessageSummary {
+                id: quickmail_core::normalized_message_id(
+                    &account.id,
+                    &format!("legacy-threadless-{index:03}"),
+                ),
+                account_id: account.id.clone(),
+                mailbox_id: Some(mailbox.id.clone()),
+                thread_id: None,
+                subject: format!("Legacy {index}"),
+                author: None,
+                timestamp: Utc::now() - chrono::Duration::days(100 - index),
+                read: true,
+                starred: false,
+                snippet: String::new(),
+                has_attachments: false,
+                labels: Vec::new(),
+                provider_data: json!({}),
+            })
+            .collect::<Vec<_>>();
+        database.upsert_message_summaries(&legacy).await.unwrap();
         daemon.sync_mailbox_page(&provider, &mailbox).await.unwrap();
 
         let queries = provider.queries.lock().unwrap().clone();
@@ -2862,12 +3340,18 @@ mod tests {
         assert_eq!(queries[0].cursor, None);
         assert!(queries[0].reconcile_message_ids.is_empty());
         assert_eq!(queries[1].cursor.as_deref(), Some("777:42"));
-        assert_eq!(
-            queries[1].reconcile_message_ids,
-            vec![quickmail_core::normalized_message_id(
-                &account.id,
-                "cursor-message"
-            )]
+        assert!(
+            queries[1]
+                .reconcile_message_ids
+                .contains(&quickmail_core::normalized_message_id(
+                    &account.id,
+                    "cursor-message"
+                ))
+        );
+        assert!(queries[1].reconcile_message_ids.contains(&legacy[0].id));
+        assert!(
+            queries[1].reconcile_message_ids.len() > SYNC_FLAG_RECONCILE_SIZE as usize,
+            "thread backfill should reach beyond the newest flag-reconciliation window"
         );
         assert_eq!(
             database
@@ -2974,6 +3458,66 @@ mod tests {
             .unwrap();
         assert_eq!(first.list_calls.load(Ordering::SeqCst), 1);
         assert_eq!(second.list_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn thread_get_returns_bounded_summary_only_conversation() {
+        let account = Account {
+            id: "thread-account".into(),
+            address: "thread@example.com".into(),
+            display_name: "Thread".into(),
+            provider: "mock".into(),
+            protocol: "MOCK".into(),
+            host: "example.com".into(),
+            unread: 0,
+            total: 2,
+            enabled: true,
+        };
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account).await.unwrap();
+        let make_message = |native_id: &str, timestamp: chrono::DateTime<Utc>| Message {
+            summary: MessageSummary {
+                id: quickmail_core::normalized_message_id(&account.id, native_id),
+                account_id: account.id.clone(),
+                mailbox_id: Some("inbox".into()),
+                thread_id: Some("thread-account:thread:conversation".into()),
+                subject: "Conversation".into(),
+                author: None,
+                timestamp,
+                read: true,
+                starred: false,
+                snippet: String::new(),
+                has_attachments: false,
+                labels: Vec::new(),
+                provider_data: json!({}),
+            },
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            body_text: None,
+            body_html: Some("<p>safe</p><script>bad()</script>".into()),
+            attachments: Vec::new(),
+        };
+        let older = make_message("older", Utc::now() - chrono::Duration::minutes(1));
+        let newer = make_message("newer", Utc::now());
+        database
+            .upsert_messages(&[newer.clone(), older.clone()])
+            .await
+            .unwrap();
+
+        let daemon = Daemon::new(database);
+        let result = daemon
+            .dispatch_inner(
+                method::THREAD_GET,
+                json!({"messageId": newer.summary.id}),
+                &mut HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["messages"][0]["id"], older.summary.id);
+        assert_eq!(result["messages"][1]["id"], newer.summary.id);
+        assert!(result["messages"][0].get("bodyHtml").is_none());
+        assert!(result["messages"][0].get("attachments").is_none());
     }
 
     #[tokio::test]

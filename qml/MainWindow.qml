@@ -14,6 +14,15 @@ Item {
     property bool accountSetupOpen: false
     property var accountToEdit: null
     readonly property bool accountSetupVisible: accountSetupPane.visible
+    readonly property bool mailSurfaceVisible: mailSurface.visible
+    readonly property bool mailSurfaceInteractive: mailSurface.enabled
+    readonly property bool composeVisible: composePane.open
+    readonly property bool composeRendered: composePane.visible
+    readonly property bool composeMinimized: composePane.minimized
+    readonly property real composeOpacity: composePane.opacity
+    readonly property real composePanelWidth: composePane.width
+    readonly property real composePanelHeight: composePane.height
+    readonly property string renderedMessageHtml: messageReaderPane.renderedBodyHtml
 
     function openAccountSetup(account) {
         accountToEdit = account || null
@@ -28,6 +37,38 @@ Item {
     function returnToList() {
         mobilePage = "list"
         navigationOpen = false
+    }
+
+    function startNewCompose() {
+        if (store.view === "compose") {
+            composePane.restore()
+            return
+        }
+        store.startCompose("compose", null)
+    }
+
+    function startContextCompose(mode, message) {
+        composePane.startAnother(mode, message)
+    }
+
+    function saveCompose() {
+        composePane.save(false)
+    }
+
+    function minimizeCompose() {
+        composePane.minimize()
+    }
+
+    function restoreCompose() {
+        composePane.restore()
+    }
+
+    function requestComposeClose() {
+        composePane.requestClose()
+    }
+
+    function discardCompose() {
+        composePane.discard()
     }
 
     Rectangle {
@@ -53,9 +94,10 @@ Item {
             Layout.fillHeight: true
 
             RowLayout {
+                id: mailSurface
                 anchors.fill: parent
                 spacing: 0
-                visible: store.view !== "compose"
+                enabled: !composePane.open || composePane.minimized
 
                 NavigationPane {
                     visible: !root.mobile
@@ -63,7 +105,7 @@ Item {
                     Layout.fillHeight: true
                     store: root.store
                     collapsed: root.medium
-                    onComposeRequested: store.startCompose("compose", null)
+                    onComposeRequested: root.startNewCompose()
                     onDraftsRequested: store.openDrafts()
                     onAccountSetupRequested: account => root.openAccountSetup(account)
                 }
@@ -95,12 +137,15 @@ Item {
                 }
 
                 MessageReaderPane {
+                    id: messageReaderPane
                     visible: !store.draftsOpen && (!root.mobile || root.mobilePage === "reader")
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
                     onBackRequested: root.returnToList()
+                    onComposeRequested: (mode, message) =>
+                        root.startContextCompose(mode, message)
                 }
 
                 DraftsPane {
@@ -114,9 +159,33 @@ Item {
             }
 
             ComposePane {
-                anchors.fill: parent
-                visible: store.view === "compose"
+                id: composePane
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: root.mobile ? 8 : 16
+                anchors.bottomMargin: root.mobile ? 8 : 12
+                width: {
+                    const available = Math.max(0, parent.width - 2 * anchors.rightMargin)
+                    if (minimized) return Math.min(340, available)
+                    if (root.mobile) return available
+                    return Math.min(560, Math.max(420, parent.width * 0.48), available)
+                }
+                height: {
+                    if (minimized) return headerHeight
+                    const available = Math.max(headerHeight,
+                        parent.height - 2 * anchors.bottomMargin)
+                    return root.mobile ? available : Math.min(620, available)
+                }
+                open: store.view === "compose"
                 store: root.store
+                z: 10
+
+                Behavior on width {
+                    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                }
+                Behavior on height {
+                    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                }
             }
 
             Rectangle {
@@ -139,7 +208,7 @@ Item {
                 store: root.store
                 onComposeRequested: {
                     root.navigationOpen = false
-                    store.startCompose("compose", null)
+                    root.startNewCompose()
                 }
                 onDraftsRequested: {
                     root.navigationOpen = false
@@ -165,7 +234,7 @@ Item {
         }
     }
 
-    Shortcut { sequence: "Ctrl+N"; onActivated: store.startCompose("compose", null) }
+    Shortcut { sequence: "Ctrl+N"; onActivated: root.startNewCompose() }
     Shortcut {
         sequence: "Escape"
         enabled: store.view !== "compose"

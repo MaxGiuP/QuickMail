@@ -42,6 +42,41 @@ Rectangle {
         }
     }
 
+    function microsoftProviderAlias(address) {
+        const value = String(address || "").trim().toLowerCase()
+        const at = value.lastIndexOf("@")
+        const domain = at >= 0 ? value.slice(at + 1) : ""
+        if (domain.indexOf("hotmail.") === 0) return "hotmail"
+        if (domain.indexOf("outlook.") === 0 || domain.indexOf("live.") === 0
+                || domain.indexOf("msn.") === 0) return "outlook"
+        return "microsoft365"
+    }
+
+    function microsoftPayload(address, displayName) {
+        const normalizedAddress = String(address || "").trim()
+        return {
+            provider: microsoftProviderAlias(normalizedAddress),
+            address: normalizedAddress,
+            displayName: String(displayName || "").trim()
+        }
+    }
+
+    function isMicrosoftProvider(value) {
+        const normalized = String(value || "").toLowerCase()
+        return normalized === "outlook" || normalized === "hotmail"
+            || normalized === "microsoft365"
+    }
+
+    function applyManualPreset(value) {
+        if (String(value) !== "exchange") return
+        imapHost.text = "outlook.office365.com"
+        imapPort.text = "993"
+        imapSecurity.currentIndex = 0
+        smtpHost.text = "smtp.office365.com"
+        smtpPort.text = "587"
+        smtpSecurity.currentIndex = 0
+    }
+
     function requestFinished(result, error) {
         if (error) {
             busy = false
@@ -78,18 +113,24 @@ Rectangle {
             }
             const address = gmailAddress.text.trim()
             payload = gmailPayload(address, gmailName.text)
+        } else if (provider === "microsoft365") {
+            if (microsoftAddress.text.trim() === "") {
+                errorText = "Enter the Microsoft mailbox address."
+                return
+            }
+            const address = microsoftAddress.text.trim()
+            payload = microsoftPayload(address, microsoftName.text)
         } else {
             if (imapAddress.text.trim() === "" || imapHost.text.trim() === ""
-                    || imapUsername.text.trim() === "" || password.text === ""
-                    || smtpHost.text.trim() === ""
+                    || password.text === "" || smtpHost.text.trim() === ""
                     || (!smtpSamePassword.checked && smtpPassword.text === "")) {
-                errorText = "Enter the address, both mail servers, username, and password."
+                errorText = "Enter the address, both mail servers, and password."
                 return
             }
             const address = imapAddress.text.trim()
-            const username = imapUsername.text.trim()
+            const username = imapUsername.text.trim() || address
             payload = {
-                provider: "imap",
+                provider: manualPreset.currentValue === "exchange" ? "exchange" : "imap",
                 address: address,
                 displayName: imapName.text.trim(),
                 imap: {
@@ -170,21 +211,24 @@ Rectangle {
                     Layout.fillWidth: true
                     text: root.editing
                         ? "Reconnect using the credentials already protected by GNOME Online Accounts or your system keyring."
-                        : "Choose how QuickMail should connect. Credentials go directly to the local daemon and are stored in your system keyring."
+                        : "Choose how QuickMail should connect. Google and Microsoft authorization stays with GNOME Online Accounts; manual mail-server passwords go directly to the local daemon and your system keyring."
                     color: Theme.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: 14
                     wrapMode: Text.WordWrap
                 }
 
-                RowLayout {
+                GridLayout {
                     visible: !root.editing
                     Layout.fillWidth: true
-                    spacing: 12
+                    columns: width < 560 ? 1 : 3
+                    rowSpacing: 12
+                    columnSpacing: 12
                     Repeater {
                         model: [
                             { id: "gmail", title: "Gmail", detail: "GNOME Online Accounts · IMAP / SMTP", icon: "mail" },
-                            { id: "imap", title: "IMAP / SMTP", detail: "Fastmail, Outlook, iCloud, or your server", icon: "folder" }
+                            { id: "microsoft365", title: "Microsoft", detail: "Outlook, Hotmail, Microsoft 365 · GOA", icon: "mail" },
+                            { id: "imap", title: "Other / Exchange", detail: "Secure manual IMAP / SMTP", icon: "folder" }
                         ]
                         delegate: Rectangle {
                             id: providerCard
@@ -256,10 +300,61 @@ Rectangle {
                 }
 
                 ColumnLayout {
+                    visible: !root.editing && root.provider === "microsoft365"
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text {
+                        text: "Microsoft through GNOME Online Accounts"
+                        color: Theme.text
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 17
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "QuickMail opens Microsoft sign-in through GNOME Online Accounts. Authorization and token refresh are managed by GOA; QuickMail never asks for or stores your Microsoft password, OAuth client ID, OAuth client secret, or access tokens. Current Microsoft accounts use GOA's granted Microsoft Graph mail access."
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Older GOA windows_live accounts can use secure IMAP/SMTP XOAUTH2 when GOA advertises it. QuickMail does not implement EWS; use Other / Exchange only when your administrator provides secure IMAP/SMTP access."
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                    TextField { id: microsoftName; Layout.fillWidth: true; placeholderText: "Display name" }
+                    TextField { id: microsoftAddress; Layout.fillWidth: true; placeholderText: "you@outlook.com or you@company.com" }
+                }
+
+                ColumnLayout {
                     visible: !root.editing && root.provider === "imap"
                     Layout.fillWidth: true
                     spacing: 10
                     Text { text: "Mailbox"; color: Theme.text; font.family: Theme.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold }
+                    ComboBox {
+                        id: manualPreset
+                        Layout.fillWidth: true
+                        model: [
+                            { text: "Custom IMAP / SMTP", value: "imap" },
+                            { text: "Exchange Online / Microsoft 365 servers", value: "exchange" }
+                        ]
+                        textRole: "text"
+                        valueRole: "value"
+                        onActivated: root.applyManualPreset(currentValue)
+                    }
+                    Text {
+                        visible: manualPreset.currentValue === "exchange"
+                        Layout.fillWidth: true
+                        text: "This fills Microsoft's published TLS server addresses, not Graph or EWS. It works only when the mailbox permits password or app-password IMAP/SMTP; many organizations disable that access."
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
                     TextField { id: imapName; Layout.fillWidth: true; placeholderText: "Display name"; text: root.account ? root.account.displayName || "" : "" }
                     TextField { id: imapAddress; Layout.fillWidth: true; placeholderText: "Email address"; text: root.account ? root.account.address || "" : "" }
                     Text { text: "Incoming mail"; color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.DemiBold }
@@ -270,7 +365,7 @@ Rectangle {
                         ComboBox { id: imapSecurity; model: [{ text: "TLS", value: "tls" }, { text: "STARTTLS", value: "starttls" }]; textRole: "text"; valueRole: "value" }
                     }
                     TextField { id: imapUsername; Layout.fillWidth: true; placeholderText: "IMAP username" }
-                    TextField { id: password; Layout.fillWidth: true; placeholderText: "App password"; echoMode: TextInput.Password }
+                    TextField { id: password; Layout.fillWidth: true; placeholderText: "Password or app password"; echoMode: TextInput.Password }
                     Text { text: "Outgoing mail"; color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.DemiBold }
                     RowLayout {
                         Layout.fillWidth: true
@@ -316,7 +411,9 @@ Rectangle {
                     Item { Layout.fillWidth: true }
                     PrimaryButton {
                         text: root.busy ? "Connecting…" : root.editing ? "Reconnect account"
-                            : root.provider === "gmail" ? "Open Google sign-in" : "Connect account"
+                            : root.provider === "gmail" ? "Open Google sign-in"
+                            : root.provider === "microsoft365" ? "Open Microsoft sign-in"
+                            : "Connect account"
                         iconName: "chevron"
                         enabled: root.provider !== "" && !root.busy
                         onClicked: root.submit()
@@ -338,7 +435,7 @@ Rectangle {
         y: Math.round((root.height - height) / 2)
         onAccepted: root.removeCurrentAccount()
         contentItem: Text {
-            text: root.provider === "gmail"
+            text: root.provider === "gmail" || root.isMicrosoftProvider(root.provider)
                 ? "This removes the account from QuickMail. Your GNOME Online Account stays connected."
                 : "This removes the account and its cached mail from QuickMail."
             color: Theme.text

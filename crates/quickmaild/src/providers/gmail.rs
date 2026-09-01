@@ -15,7 +15,7 @@ use url::Url;
 use super::{
     MAX_MAIL_ATTACHMENT_BYTES, MAX_MAIL_MESSAGE_BYTES,
     auth::{TokenError, TokenSource},
-    mime::{MimeCodec, MimeError, sanitize_filename},
+    mime::{MimeCodec, MimeError, parse_message_ids, reply_reference_chain, sanitize_filename},
 };
 
 const DEFAULT_API_ROOT: &str = "https://gmail.googleapis.com/gmail/v1/";
@@ -669,7 +669,10 @@ where
                 .iter()
                 .find(|label| label.as_str() == "INBOX")
                 .cloned(),
-            thread_id: Some(message.thread_id.clone()),
+            thread_id: Some(normalized_message_id(
+                &self.account.id,
+                &format!("thread:{}", message.thread_id),
+            )),
             subject: gmail_header(headers, "Subject")
                 .unwrap_or_default()
                 .to_owned(),
@@ -688,6 +691,12 @@ where
             provider_data: serde_json::json!({
                 "nativeId": message.id,
                 "messageId": gmail_header(headers, "Message-ID"),
+                "references": gmail_header(headers, "References")
+                    .map(parse_message_ids)
+                    .unwrap_or_default(),
+                "inReplyTo": gmail_header(headers, "In-Reply-To")
+                    .map(parse_message_ids)
+                    .unwrap_or_default(),
                 "historyId": message.history_id,
                 "sizeEstimate": message.size_estimate,
             }),
@@ -910,10 +919,10 @@ where
             name: self.account.display_name.clone(),
             address: self.account.address.clone(),
         };
-        let reply_message_id = match message.in_reply_to.as_deref() {
-            Some(parent_id) => Some(
-                self.get_message(parent_id)
-                    .await?
+        let (reply_message_id, reply_references) = match message.in_reply_to.as_deref() {
+            Some(parent_id) => {
+                let parent = self.get_message(parent_id).await?;
+                let message_id = parent
                     .summary
                     .provider_data
                     .get("messageId")
@@ -921,13 +930,20 @@ where
                     .ok_or_else(|| {
                         ProviderError::Other("reply target has no RFC Message-ID".into())
                     })?
-                    .to_owned(),
-            ),
-            None => None,
+                    .to_owned();
+                let references = reply_reference_chain(&parent.summary.provider_data);
+                (Some(message_id), references)
+            }
+            None => (None, Vec::new()),
         };
         let raw = self
             .mime
-            .build_reply(&from, &message, reply_message_id.as_deref())
+            .build_reply(
+                &from,
+                &message,
+                reply_message_id.as_deref(),
+                &reply_references,
+            )
             .map_err(mime_provider_error)?;
         let native_id = self
             .rest

@@ -13,6 +13,10 @@ QtObject {
     property var events: []
     property var drafts: []
     property var selectedMessage: null
+    property var threadMessages: []
+    property string activeThreadId: ""
+    property bool threadLoading: false
+    property bool threadTruncated: false
     property string activeAccountId: ""
     property string activeFolderId: "inbox"
     property string searchText: ""
@@ -37,6 +41,8 @@ QtObject {
     property int mailboxesRequestGeneration: 0
     property int messageListGeneration: 0
     property int readerGeneration: 0
+    property int threadGeneration: 0
+    property int threadLoadSerial: 0
     property int composeGeneration: 0
     property int draftsRequestGeneration: 0
     property int draftOpenGeneration: 0
@@ -44,6 +50,7 @@ QtObject {
     readonly property var activeAccount: findById(accounts, activeAccountId)
     readonly property var activeFolder: findById(folders, activeFolderId)
     readonly property bool hasMore: nextCursor !== ""
+    readonly property var conversations: buildConversations(messages)
 
     signal messageListChangedByAction()
     signal accountStateChanged(var event)
@@ -75,9 +82,91 @@ QtObject {
         return String(message ? (message.accountId || message.account_id || "") : "")
     }
 
+    function messageMailboxId(message) {
+        return String(message ? (message.mailboxId || message.mailbox_id || "") : "")
+    }
+
     function belongsToAccount(message, id) {
         const owner = messageAccountId(message)
         return owner !== "" && owner === String(id)
+    }
+
+    function messageThreadId(message) {
+        return String(message ? (message.threadId || message.thread_id || "") : "")
+    }
+
+    function threadKey(message) {
+        const id = messageThreadId(message)
+        return id !== "" ? id : messageId(message)
+    }
+
+    function isUnread(message) {
+        return message && (message.unread === true
+            || message.is_read === false || message.read === false)
+    }
+
+    function senderName(message) {
+        return String(message && (message.from_name || message.sender_name
+            || (message.author && (message.author.name || message.author.address))
+            || message.from || message.from_address) || "Unknown sender")
+    }
+
+    function buildConversations(source) {
+        const list = Array.isArray(source) ? source : []
+        const result = []
+        const indexes = ({})
+        for (let i = 0; i < list.length; ++i) {
+            const message = list[i]
+            const key = threadKey(message)
+            if (key === "") continue
+            const lookupKey = "$" + key
+            let index = indexes[lookupKey]
+            if (index === undefined) {
+                const first = Object.assign({}, message, {
+                    conversationKey: key,
+                    conversationCount: 1,
+                    conversationMessageIds: [messageId(message)],
+                    conversationSenders: [senderName(message)],
+                    conversationUnreadCount: isUnread(message) ? 1 : 0
+                })
+                indexes[lookupKey] = result.length
+                result.push(first)
+                continue
+            }
+            const conversation = result[index]
+            const ids = conversation.conversationMessageIds.slice()
+            const id = messageId(message)
+            if (ids.indexOf(id) < 0) ids.push(id)
+            const senders = conversation.conversationSenders.slice()
+            const sender = senderName(message)
+            if (senders.indexOf(sender) < 0) senders.push(sender)
+            const unreadCount = Number(conversation.conversationUnreadCount || 0)
+                + (isUnread(message) ? 1 : 0)
+            result[index] = Object.assign({}, conversation, {
+                conversationCount: Number(conversation.conversationCount || 1) + 1,
+                conversationMessageIds: ids,
+                conversationSenders: senders,
+                conversationUnreadCount: unreadCount,
+                read: unreadCount === 0,
+                is_read: unreadCount === 0,
+                unread: unreadCount > 0,
+                starred: conversation.starred === true || message.starred === true,
+                hasAttachments: conversation.hasAttachments === true
+                    || conversation.has_attachments === true
+                    || message.hasAttachments === true
+                    || message.has_attachments === true
+            })
+        }
+        return result
+    }
+
+    function clearThread() {
+        ++threadGeneration
+        ++threadLoadSerial
+        threadMessages = []
+        activeThreadId = ""
+        threadLoading = false
+        threadTruncated = false
     }
 
     function applySnapshot(snapshot) {
@@ -149,6 +238,7 @@ QtObject {
                 root.folders = []
                 root.messages = []
                 root.selectedMessage = null
+                root.clearThread()
                 root.loading = false
                 root.loadingMore = false
                 root.readerLoading = false
@@ -230,6 +320,7 @@ QtObject {
             nextCursor = ""
             if (!preserveSelection) {
                 selectedMessage = null
+                clearThread()
                 readerLoading = false
                 ++readerGeneration
             }
@@ -296,6 +387,7 @@ QtObject {
         folders = []
         messages = []
         selectedMessage = null
+        clearThread()
         readerLoading = false
         loading = false
         loadingMore = false
@@ -340,11 +432,45 @@ QtObject {
         const id = messageId(message)
         const requestedAccountId = activeAccountId
         if (id === "" || !belongsToAccount(message, requestedAccountId)) return
-        const generation = ++readerGeneration
         draftsOpen = false
+        activeThreadId = threadKey(message)
+        threadMessages = [message]
+        threadTruncated = false
+        const conversationGeneration = ++threadGeneration
+        loadThread(id, conversationGeneration, requestedAccountId)
+        openThreadMessage(message)
+    }
+
+    function loadThread(messageIdValue, generation, requestedAccountId) {
+        const serial = ++threadLoadSerial
+        threadLoading = true
+        rpc.request(rpc.methods.threadGet, { messageId: messageIdValue }, function(result, error) {
+            if (generation !== root.threadGeneration
+                    || serial !== root.threadLoadSerial
+                    || requestedAccountId !== root.activeAccountId) return
+            root.threadLoading = false
+            if (error) {
+                // Reading one message remains useful if the cache does not yet
+                // have enough ancestry to assemble a conversation.
+                return
+            }
+            const list = root.normalizeArray(result, "messages").filter(function(item) {
+                return root.belongsToAccount(item, requestedAccountId)
+            })
+            if (list.length > 0) root.threadMessages = list
+            root.activeThreadId = String(result && result.id || root.activeThreadId)
+            root.threadTruncated = result && result.truncated === true
+        })
+    }
+
+    function openThreadMessage(message) {
+        const id = messageId(message)
+        const requestedAccountId = activeAccountId
+        if (id === "" || !belongsToAccount(message, requestedAccountId)) return
+        const generation = ++readerGeneration
         selectedMessage = message
         readerLoading = true
-        if (message.unread === true || message.is_read === false || message.read === false)
+        if (isUnread(message))
             markRead(message, true)
         rpc.request(rpc.methods.mailGet, {
             messageId: id
@@ -360,28 +486,94 @@ QtObject {
             }
             if (result) {
                 const detail = result.message || result
-                if (root.belongsToAccount(detail, requestedAccountId))
-                    root.selectedMessage = detail
+                if (root.belongsToAccount(detail, requestedAccountId)) {
+                    const actionIds = []
+                    const addActionId = function(value) {
+                        const candidate = String(value || "")
+                        if (candidate !== "" && actionIds.indexOf(candidate) < 0)
+                            actionIds.push(candidate)
+                    }
+                    const actionMailbox = root.messageMailboxId(message)
+                        || root.activeFolderId
+                    const originalIds = Array.isArray(message.conversationMessageIds)
+                        ? message.conversationMessageIds : []
+                    for (let i = 0; i < originalIds.length; ++i)
+                        addActionId(originalIds[i])
+                    for (let i = 0; i < root.threadMessages.length; ++i) {
+                        const member = root.threadMessages[i]
+                        if (root.messageMailboxId(member) === actionMailbox)
+                            addActionId(root.messageId(member))
+                    }
+                    addActionId(id)
+                    const conversationDetail = Object.assign({}, detail,
+                        { conversationMessageIds: actionIds })
+                    root.selectedMessage = conversationDetail
+                    root.patchThreadMessage(id, conversationDetail)
+                    const detailThread = root.threadKey(conversationDetail)
+                    if (root.threadMessages.length <= 1
+                            && detailThread !== root.activeThreadId) {
+                        root.activeThreadId = detailThread
+                        root.loadThread(id, root.threadGeneration, requestedAccountId)
+                    }
+                }
             }
         })
     }
 
-    function patchMessage(id, changes) {
-        const list = messages.slice()
+    function patchThreadMessage(id, changes) {
+        const list = threadMessages.slice()
         for (let i = 0; i < list.length; ++i) {
             if (messageId(list[i]) !== String(id)) continue
+            list[i] = Object.assign({}, list[i], changes)
+            threadMessages = list
+            return
+        }
+    }
+
+    function actionMessageIds(message) {
+        const source = message && Array.isArray(message.conversationMessageIds)
+            ? message.conversationMessageIds : [messageId(message)]
+        const result = []
+        for (let i = 0; i < source.length; ++i) {
+            const id = String(source[i] || "")
+            if (id !== "" && result.indexOf(id) < 0) result.push(id)
+        }
+        return result
+    }
+
+    function patchMessage(id, changes) {
+        patchMessages([id], changes)
+    }
+
+    function patchMessages(ids, changes) {
+        const list = messages.slice()
+        for (let i = 0; i < list.length; ++i) {
+            if (ids.indexOf(messageId(list[i])) < 0) continue
             const copy = Object.assign({}, list[i], changes)
             list[i] = copy
-            if (selectedMessage && messageId(selectedMessage) === String(id))
-                selectedMessage = Object.assign({}, selectedMessage, changes)
-            break
         }
         messages = list
+        const thread = threadMessages.slice()
+        for (let i = 0; i < thread.length; ++i) {
+            if (ids.indexOf(messageId(thread[i])) >= 0)
+                thread[i] = Object.assign({}, thread[i], changes)
+        }
+        threadMessages = thread
+        if (selectedMessage && ids.indexOf(messageId(selectedMessage)) >= 0)
+            selectedMessage = Object.assign({}, selectedMessage, changes)
     }
 
     function removeMessage(id) {
-        messages = messages.filter(message => messageId(message) !== String(id))
-        if (selectedMessage && messageId(selectedMessage) === String(id)) selectedMessage = null
+        removeMessages([id])
+    }
+
+    function removeMessages(ids) {
+        messages = messages.filter(message => ids.indexOf(messageId(message)) < 0)
+        threadMessages = threadMessages.filter(message => ids.indexOf(messageId(message)) < 0)
+        if (selectedMessage && ids.indexOf(messageId(selectedMessage)) >= 0) {
+            selectedMessage = null
+            clearThread()
+        }
         messageListChangedByAction()
     }
 
@@ -391,9 +583,11 @@ QtObject {
             errorText = "This message does not belong to the active account"
             return
         }
-        if (remove) removeMessage(id)
-        else if (optimistic) patchMessage(id, optimistic)
-        rpc.request(method, params || ({}), function(result, error) {
+        const ids = actionMessageIds(message)
+        if (remove) removeMessages(ids)
+        else if (optimistic) patchMessages(ids, optimistic)
+        const requestParams = Object.assign({}, params || ({}), { messageIds: ids })
+        rpc.request(method, requestParams, function(result, error) {
             if (error) {
                 root.errorText = error.message || "That action could not be completed"
                 root.loadMessages(true, !remove)
@@ -403,24 +597,24 @@ QtObject {
 
     function markRead(message, read) {
         mutate(rpc.methods.mailAction, message,
-            { kind: "mark_read", messageIds: [messageId(message)], read: read },
+            { kind: "mark_read", read: read },
             { unread: !read, is_read: read, read: read }, false)
     }
 
     function toggleStar(message) {
         const starred = !(message.starred === true || message.is_starred === true)
         mutate(rpc.methods.mailAction, message,
-            { kind: "star", messageIds: [messageId(message)], starred: starred },
+            { kind: "star", starred: starred },
             { starred: starred, is_starred: starred }, false)
     }
 
     function archive(message) {
         mutate(rpc.methods.mailAction, message,
-            { kind: "archive", messageIds: [messageId(message)] }, null, true)
+            { kind: "archive" }, null, true)
     }
     function trash(message) {
         mutate(rpc.methods.mailAction, message,
-            { kind: "trash", messageIds: [messageId(message)] }, null, true)
+            { kind: "trash" }, null, true)
     }
 
     function sync(callback) {
@@ -684,6 +878,7 @@ QtObject {
     function openDrafts() {
         ++readerGeneration
         selectedMessage = null
+        clearThread()
         readerLoading = false
         draftsOpen = true
         view = "mail"
@@ -757,6 +952,7 @@ QtObject {
                 root.activeAccountId = ""
                 root.folders = []
                 root.messages = []
+                root.clearThread()
                 root.drafts = []
                 root.loadAccounts()
             }

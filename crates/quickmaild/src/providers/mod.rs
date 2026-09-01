@@ -9,6 +9,7 @@ pub(crate) mod auth;
 mod factory;
 pub(crate) mod gmail;
 pub(crate) mod imap_smtp;
+pub(crate) mod microsoft_graph;
 pub(crate) mod mime;
 
 pub use factory::ProductionProviderFactory;

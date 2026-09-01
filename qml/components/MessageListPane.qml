@@ -31,8 +31,9 @@ Rectangle {
     }
 
     function openCursor() {
-        if (messageList.currentIndex < 0 || messageList.currentIndex >= store.messages.length) return
-        store.openMessage(store.messages[messageList.currentIndex])
+        if (messageList.currentIndex < 0
+                || messageList.currentIndex >= store.conversations.length) return
+        store.openMessage(store.conversations[messageList.currentIndex])
         messageActivated()
     }
 
@@ -67,7 +68,8 @@ Rectangle {
                 }
                 Text {
                     visible: store.messages.length > 0
-                    text: store.messages.length + (store.hasMore ? "+ messages" : " messages")
+                    text: store.conversations.length + (store.hasMore ? "+ conversations"
+                        : store.conversations.length === 1 ? " conversation" : " conversations")
                     color: Theme.textMuted
                     font.family: Theme.fontFamily
                     font.pixelSize: 11
@@ -142,14 +144,15 @@ Rectangle {
                 anchors.fill: parent
                 anchors.margins: 6
                 visible: store.messages.length > 0
-                model: store.messages
+                model: store.conversations
                 spacing: 2
                 clip: true
                 focus: true
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ScrollBar {}
-                currentIndex: store.selectedMessage ? Math.max(0, store.messages.findIndex(
-                    message => store.messageId(message) === store.messageId(store.selectedMessage))) : 0
+                currentIndex: store.selectedMessage ? Math.max(0, store.conversations.findIndex(
+                    message => store.threadKey(message)
+                        === store.threadKey(store.selectedMessage))) : 0
                 delegate: MessageRow {
                     id: row
                     required property var modelData
@@ -158,7 +161,7 @@ Rectangle {
                     message: modelData
                     compact: root.width < 330
                     selected: store.selectedMessage
-                        && store.messageId(store.selectedMessage) === store.messageId(modelData)
+                        && store.threadKey(store.selectedMessage) === store.threadKey(modelData)
                     onActivated: {
                         messageList.currentIndex = index
                         store.openMessage(modelData)
@@ -192,11 +195,11 @@ Rectangle {
                             || event.key === Qt.Key_O) {
                         root.openCursor(); event.accepted = true
                     } else if (event.key === Qt.Key_E && currentIndex >= 0) {
-                        store.archive(store.messages[currentIndex]); event.accepted = true
+                        store.archive(store.conversations[currentIndex]); event.accepted = true
                     } else if (event.key === Qt.Key_Delete && currentIndex >= 0) {
-                        store.trash(store.messages[currentIndex]); event.accepted = true
+                        store.trash(store.conversations[currentIndex]); event.accepted = true
                     } else if (event.key === Qt.Key_S && currentIndex >= 0) {
-                        store.toggleStar(store.messages[currentIndex]); event.accepted = true
+                        store.toggleStar(store.conversations[currentIndex]); event.accepted = true
                     }
                 }
             }

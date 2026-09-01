@@ -22,6 +22,8 @@ Item {
         property var requests: []
         property bool delayMail: false
         property bool syncFailure: false
+        property var threadResult: null
+        property var mailDetail: null
         property var delayedMail: []
         property var snapshotResult: ({})
         property var methods: ({
@@ -30,6 +32,7 @@ Item {
             mailboxes: "mailboxes.list",
             mailList: "mail.list",
             mailGet: "mail.get",
+            threadGet: "thread.get",
             mailAction: "mail.action",
             draftSave: "draft.save",
             draftList: "draft.list",
@@ -76,6 +79,10 @@ Item {
                 delayedMail = pending
             } else if (method === methods.mailList)
                 callback({ messages: [], nextCursor: null }, null)
+            else if (method === methods.threadGet)
+                callback(threadResult || ({ messages: [], truncated: false }), null)
+            else if (method === methods.mailGet)
+                callback(mailDetail || ({}), null)
             else if (method === methods.draftSave)
                 callback({ draft: { draftId: "draft-returned" }, revision: 2 }, null)
             else if (method === methods.draftList)
@@ -224,6 +231,54 @@ Item {
                 && request.params.messageIds[0] === "account-a:message-a"
                 && request.params.message_ids === undefined,
                 "mail.action did not use the camelCase wire contract")
+
+            const threadFirst = {
+                id: "account-a:message-1", accountId: "account-a",
+                mailboxId: "inbox",
+                threadId: "account-a:thread-1", subject: "Threaded mail",
+                author: { name: "Alex", address: "alex@example.com" },
+                timestamp: 1788220800000, read: true, snippet: "First"
+            }
+            const threadSecond = {
+                id: "account-a:message-2", accountId: "account-a",
+                mailboxId: "inbox",
+                threadId: "account-a:thread-1", subject: "Re: Threaded mail",
+                author: { name: "Jamie", address: "jamie@example.com" },
+                timestamp: 1788224400000, read: true, starred: true, snippet: "Second"
+            }
+            store.messages = [threadSecond, threadFirst]
+            root.expect(store.conversations.length === 1
+                && store.conversations[0].conversationCount === 2
+                && store.conversations[0].conversationMessageIds.length === 2
+                && store.conversations[0].starred === true,
+                "message list did not group and aggregate a conversation")
+            const threadSent = Object.assign({}, threadSecond, {
+                id: "account-a:sent-message", mailboxId: "sent", snippet: "Sent copy"
+            })
+            fakeRpc.threadResult = {
+                id: "account-a:thread-1",
+                messages: [threadFirst, threadSecond, threadSent], truncated: false
+            }
+            fakeRpc.mailDetail = Object.assign({}, threadSecond, { bodyText: "Second body" })
+            store.openMessage(store.conversations[0])
+            root.expect(store.threadMessages.length === 3
+                && store.activeThreadId === "account-a:thread-1",
+                "thread.get did not populate the chronological conversation")
+            request = fakeRpc.requests[fakeRpc.requests.length - 2]
+            root.expect(request.method === fakeRpc.methods.threadGet
+                && request.params.messageId === "account-a:message-2",
+                "opening a conversation did not request its thread")
+            fakeRpc.mailDetail = Object.assign({}, threadFirst, { bodyText: "First body" })
+            store.openThreadMessage(threadFirst)
+            root.expect(store.messageId(store.selectedMessage) === "account-a:message-1"
+                && store.selectedMessage.bodyText === "First body",
+                "a different message in the thread could not be opened")
+            root.expect(store.selectedMessage.conversationMessageIds.length === 2,
+                "mail.get mixed cross-mailbox IDs into a conversation action")
+            store.toggleStar(store.selectedMessage)
+            request = fakeRpc.requests[fakeRpc.requests.length - 1]
+            root.expect(request.params.messageIds.length === 2,
+                "reader actions did not apply consistently to the conversation")
             let automaticSync = null
             for (let i = 0; i < fakeRpc.requests.length; ++i) {
                 if (fakeRpc.requests[i].method === fakeRpc.methods.syncStart)
@@ -236,6 +291,19 @@ Item {
             root.expect(Object.keys(gmail).length === 3, "Gmail setup contains unexpected fields")
             root.expect(gmail.provider === "gmail" && gmail.address === "person@gmail.com"
                 && gmail.displayName === "Person", "Gmail setup payload is incompatible")
+
+            const outlook = setupPane.microsoftPayload(" person@outlook.com ", "Person")
+            root.expect(Object.keys(outlook).length === 3,
+                "Microsoft setup contains credentials or unexpected fields")
+            root.expect(outlook.provider === "outlook"
+                && outlook.address === "person@outlook.com"
+                && outlook.displayName === "Person"
+                && outlook.imap === undefined && outlook.smtp === undefined,
+                "Outlook setup payload is incompatible")
+            root.expect(setupPane.microsoftPayload("person@hotmail.co.uk", "").provider
+                === "hotmail", "Hotmail address did not use the brokered alias")
+            root.expect(setupPane.microsoftPayload("person@company.example", "").provider
+                === "microsoft365", "organization address did not use Microsoft 365")
 
             store.activeAccountId = "account-a"
             store.startCompose("reply", {

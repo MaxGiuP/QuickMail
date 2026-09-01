@@ -16,7 +16,9 @@ Rectangle {
 
     readonly property bool unread: message.unread === true || message.is_read === false || message.read === false
     readonly property bool starred: message.starred === true || message.is_starred === true
-    readonly property string sender: String(message.from_name || message.sender_name
+    readonly property int conversationCount: Number(message.conversationCount || 1)
+    readonly property string sender: Array.isArray(message.conversationSenders)
+        ? message.conversationSenders.join(", ") : String(message.from_name || message.sender_name
         || (message.author && (message.author.name || message.author.address))
         || message.from || message.from_address || "Unknown sender")
     readonly property string subject: String(message.subject || "(No subject)")
@@ -86,6 +88,15 @@ Rectangle {
                     font.pixelSize: 13
                     font.weight: root.unread ? Font.Bold : Font.DemiBold
                     elide: Text.ElideRight
+                }
+                Text {
+                    visible: root.conversationCount > 1
+                    text: root.conversationCount
+                    textFormat: Text.PlainText
+                    color: root.unread ? Theme.accent : Theme.textMuted
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 10
+                    font.weight: Font.DemiBold
                 }
                 Text {
                     text: root.timestamp

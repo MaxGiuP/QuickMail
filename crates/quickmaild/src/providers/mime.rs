@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use mail_builder::MessageBuilder;
 use mail_parser::{MessageParser, MimeHeaders};
 use quickmail_core::{Address, OutgoingMessage};
+use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -18,6 +19,8 @@ pub(crate) struct ParsedMime {
     pub(crate) bcc: Vec<Address>,
     pub(crate) date: Option<DateTime<Utc>>,
     pub(crate) message_id: Option<String>,
+    pub(crate) in_reply_to: Vec<String>,
+    pub(crate) references: Vec<String>,
     pub(crate) text_body: Option<String>,
     pub(crate) html_body: Option<String>,
     pub(crate) attachments: Vec<ParsedAttachment>,
@@ -40,8 +43,31 @@ pub(crate) trait MimeCodec: Send + Sync {
         from: &Address,
         message: &OutgoingMessage,
         _rfc_message_id: Option<&str>,
+        _rfc_references: &[String],
     ) -> Result<Vec<u8>, MimeError> {
         self.build(from, message)
+    }
+}
+
+/// Builds the ancestry inherited by a new reply. Older messages sometimes
+/// carry only In-Reply-To; in that case it is the best available seed for the
+/// References chain rather than starting a new conversation at the parent.
+pub(crate) fn reply_reference_chain(provider_data: &Value) -> Vec<String> {
+    let values = |key| {
+        provider_data
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let references = values("references");
+    if references.is_empty() {
+        values("inReplyTo")
+    } else {
+        references
     }
 }
 
@@ -97,6 +123,20 @@ impl MimeCodec for ProductionMimeCodec {
                 .date()
                 .and_then(|date| DateTime::from_timestamp(date.to_timestamp(), 0)),
             message_id: message.message_id().map(str::to_owned),
+            in_reply_to: message
+                .in_reply_to()
+                .as_text_list()
+                .unwrap_or_default()
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            references: message
+                .references()
+                .as_text_list()
+                .unwrap_or_default()
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
             text_body: message.body_text(0).map(|body| body.into_owned()),
             html_body: message.body_html(0).map(|body| body.into_owned()),
             attachments,
@@ -104,7 +144,7 @@ impl MimeCodec for ProductionMimeCodec {
     }
 
     fn build(&self, from: &Address, message: &OutgoingMessage) -> Result<Vec<u8>, MimeError> {
-        production_build(from, message, None)
+        production_build(from, message, None, &[])
     }
 
     fn build_reply(
@@ -112,8 +152,9 @@ impl MimeCodec for ProductionMimeCodec {
         from: &Address,
         message: &OutgoingMessage,
         rfc_message_id: Option<&str>,
+        rfc_references: &[String],
     ) -> Result<Vec<u8>, MimeError> {
-        production_build(from, message, rfc_message_id)
+        production_build(from, message, rfc_message_id, rfc_references)
     }
 }
 
@@ -121,6 +162,7 @@ fn production_build(
     from: &Address,
     message: &OutgoingMessage,
     rfc_message_id: Option<&str>,
+    rfc_references: &[String],
 ) -> Result<Vec<u8>, MimeError> {
     validate_address(from)?;
     for address in message
@@ -140,14 +182,16 @@ fn production_build(
         builder = builder.cc(builder_addresses(&message.cc));
     }
     if let Some(message_id) = rfc_message_id {
-        validate_header(message_id)?;
-        let message_id = message_id
-            .strip_prefix('<')
-            .and_then(|value| value.strip_suffix('>'))
-            .unwrap_or(message_id);
-        builder = builder
-            .in_reply_to(message_id.to_owned())
-            .references(message_id.to_owned());
+        let message_id = bare_message_id(message_id)?;
+        let mut references = rfc_references
+            .iter()
+            .take(99)
+            .map(|reference| bare_message_id(reference))
+            .collect::<Result<Vec<_>, _>>()?;
+        if references.last() != Some(&message_id) {
+            references.push(message_id.clone());
+        }
+        builder = builder.in_reply_to(message_id).references(references);
     }
     if let Some(text) = message.body_text.clone() {
         builder = builder.text_body(text);
@@ -226,6 +270,12 @@ impl MimeCodec for SafeMimeCodec {
                 .and_then(|date| DateTime::parse_from_rfc2822(date).ok())
                 .map(|date| date.with_timezone(&Utc)),
             message_id: header(&headers, "message-id").map(str::to_owned),
+            in_reply_to: header(&headers, "in-reply-to")
+                .map(parse_message_ids)
+                .unwrap_or_default(),
+            references: header(&headers, "references")
+                .map(parse_message_ids)
+                .unwrap_or_default(),
             ..ParsedMime::default()
         };
         let mut attachment_bytes = 0;
@@ -509,6 +559,23 @@ fn parse_addresses(value: &str) -> Vec<Address> {
     value.split(',').filter_map(parse_single_address).collect()
 }
 
+pub(crate) fn parse_message_ids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut remainder = value;
+    while let Some(start) = remainder.find('<') {
+        remainder = &remainder[start + 1..];
+        let Some(end) = remainder.find('>') else {
+            break;
+        };
+        let id = remainder[..end].trim();
+        if !id.is_empty() {
+            ids.push(id.to_owned());
+        }
+        remainder = &remainder[end + 1..];
+    }
+    ids
+}
+
 fn parse_single_address(value: &str) -> Option<Address> {
     let value = value.trim();
     if let Some((name, address)) = value.rsplit_once('<') {
@@ -613,6 +680,20 @@ fn validate_header(value: &str) -> Result<(), MimeError> {
     }
 }
 
+fn bare_message_id(value: &str) -> Result<String, MimeError> {
+    validate_header(value)?;
+    let value = value
+        .trim()
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(value.trim())
+        .trim();
+    if value.is_empty() || value.len() > 998 || !value.contains('@') {
+        return Err(MimeError::InvalidMessageId);
+    }
+    Ok(value.to_owned())
+}
+
 fn push_header(output: &mut String, name: &str, value: &str) {
     output.push_str(name);
     output.push_str(": ");
@@ -656,6 +737,8 @@ pub(crate) enum MimeError {
     HeaderInjection,
     #[error("invalid email address")]
     InvalidAddress,
+    #[error("invalid RFC Message-ID")]
+    InvalidMessageId,
 }
 
 #[cfg(test)]
@@ -749,6 +832,18 @@ mod tests {
     }
 
     #[test]
+    fn production_codec_preserves_rfc_thread_ancestry() {
+        let raw = b"Message-ID: <child@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com> <parent@example.com>\r\nSubject: Re: hello\r\n\r\nReply\r\n";
+        let parsed = ProductionMimeCodec.parse(raw).unwrap();
+        assert_eq!(parsed.message_id.as_deref(), Some("child@example.com"));
+        assert_eq!(parsed.in_reply_to, ["parent@example.com"]);
+        assert_eq!(
+            parsed.references,
+            ["root@example.com", "parent@example.com"]
+        );
+    }
+
+    #[test]
     fn production_limits_reject_oversized_messages_without_parsing() {
         assert_eq!(
             validate_message_size(MAX_MAIL_MESSAGE_BYTES + 1, MAX_MAIL_MESSAGE_BYTES),
@@ -800,6 +895,7 @@ mod tests {
                 },
                 &outgoing,
                 Some("<original@example.com>"),
+                &[],
             )
             .unwrap();
         let text = String::from_utf8(raw).unwrap();
@@ -812,5 +908,57 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("account:native"));
+    }
+
+    #[test]
+    fn production_reply_extends_the_parent_reference_chain() {
+        let outgoing = OutgoingMessage {
+            draft_id: None,
+            account_id: "a".into(),
+            to: vec![Address {
+                name: String::new(),
+                address: "bob@example.com".into(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Re: hello".into(),
+            body_text: Some("nested reply".into()),
+            body_html: None,
+            in_reply_to: Some("account:parent".into()),
+        };
+        let raw = ProductionMimeCodec
+            .build_reply(
+                &Address {
+                    name: String::new(),
+                    address: "alice@example.com".into(),
+                },
+                &outgoing,
+                Some("parent@example.com"),
+                &["root@example.com".into()],
+            )
+            .unwrap();
+        let text = String::from_utf8(raw).unwrap();
+        assert!(
+            text.contains("References: <root@example.com> <parent@example.com>"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn legacy_in_reply_to_seeds_a_missing_reference_chain() {
+        assert_eq!(
+            reply_reference_chain(&serde_json::json!({
+                "references": [],
+                "inReplyTo": ["root@example.com"]
+            })),
+            ["root@example.com"]
+        );
+        assert_eq!(
+            reply_reference_chain(&serde_json::json!({
+                "references": ["root@example.com", "parent@example.com"],
+                "inReplyTo": ["ignored@example.com"]
+            })),
+            ["root@example.com", "parent@example.com"]
+        );
     }
 }

@@ -34,7 +34,7 @@ use uuid::Uuid;
 use super::{
     MAX_MAIL_MESSAGE_BYTES,
     auth::{SecretString, TokenSource},
-    mime::{MimeCodec, MimeError, ProductionMimeCodec},
+    mime::{MimeCodec, MimeError, ProductionMimeCodec, reply_reference_chain},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +184,8 @@ pub(crate) struct ImapEnvelope {
     pub(crate) snippet: String,
     pub(crate) has_attachments: bool,
     pub(crate) message_id: Option<String>,
+    pub(crate) in_reply_to: Vec<String>,
+    pub(crate) references: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,7 +265,7 @@ const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const IMAP_STATUS_BUDGET: Duration = Duration::from_secs(3);
 const IMAP_INCREMENTAL_UID_SEARCH_SPAN: u64 = 4_096;
 const IMAP_BOOTSTRAP_MAX_SEARCH_WINDOWS: usize = 16;
-const IMAP_SUMMARY_FETCH: &str = "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID CONTENT-TYPE CONTENT-DISPOSITION)])";
+const IMAP_SUMMARY_FETCH: &str = "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-DISPOSITION)])";
 
 fn bounded_raw_fetch_query(limit: usize) -> String {
     // Request one byte beyond the accepted limit so a missing or dishonest
@@ -702,6 +704,8 @@ impl ImapTransport for AsyncImapTransport {
                     snippet: String::new(),
                     has_attachments: headers.has_attachments,
                     message_id: headers.message_id,
+                    in_reply_to: headers.in_reply_to,
+                    references: headers.references,
                 })
             })
             .collect::<Result<Vec<_>, ImapError>>()?;
@@ -1117,6 +1121,8 @@ struct SummaryHeaders {
     from: Option<Address>,
     timestamp: Option<DateTime<Utc>>,
     message_id: Option<String>,
+    in_reply_to: Vec<String>,
+    references: Vec<String>,
     has_attachments: bool,
 }
 
@@ -1137,6 +1143,8 @@ fn parse_summary_headers(raw: &[u8]) -> SummaryHeaders {
         from: parsed.from,
         timestamp: parsed.date,
         message_id: parsed.message_id,
+        in_reply_to: parsed.in_reply_to,
+        references: parsed.references,
         has_attachments,
     }
 }
@@ -1620,7 +1628,7 @@ where
         ProviderCapabilities {
             folders: true,
             labels: false,
-            threads: false,
+            threads: true,
             server_search: true,
             archive: self.config.discover_special_use || self.config.archive_mailbox.is_some(),
             spam: false,
@@ -1825,12 +1833,24 @@ where
             return Err(ProviderError::NotFound);
         }
         let parsed = self.mime.parse(&raw).map_err(mime_provider_error)?;
+        let thread_id = imap_thread_id(
+            &self.account.id,
+            parsed.message_id.as_deref(),
+            &parsed.references,
+            &parsed.in_reply_to,
+        )
+        .or_else(|| {
+            Some(imap_singleton_thread_id(
+                &self.account.id,
+                &parsed_id.to_string(),
+            ))
+        });
         Ok(Message {
             summary: MessageSummary {
                 id: id.to_owned(),
                 account_id: self.account.id.clone(),
                 mailbox_id: Some(parsed_id.mailbox),
-                thread_id: None,
+                thread_id,
                 subject: parsed.subject,
                 author: parsed.from,
                 timestamp: parsed.date.unwrap_or_else(Utc::now),
@@ -1849,7 +1869,11 @@ where
                     .into_iter()
                     .filter(|flag| !flag.starts_with('\\'))
                     .collect(),
-                provider_data: json!({ "messageId": parsed.message_id }),
+                provider_data: json!({
+                    "messageId": parsed.message_id,
+                    "references": parsed.references,
+                    "inReplyTo": parsed.in_reply_to,
+                }),
             },
             to: parsed.to,
             cc: parsed.cc,
@@ -1949,10 +1973,10 @@ where
             name: self.account.display_name.clone(),
             address: self.account.address.clone(),
         };
-        let reply_message_id = match message.in_reply_to.as_deref() {
-            Some(parent_id) => Some(
-                self.get_message(parent_id)
-                    .await?
+        let (reply_message_id, reply_references) = match message.in_reply_to.as_deref() {
+            Some(parent_id) => {
+                let parent = self.get_message(parent_id).await?;
+                let message_id = parent
                     .summary
                     .provider_data
                     .get("messageId")
@@ -1960,13 +1984,20 @@ where
                     .ok_or_else(|| {
                         ProviderError::Other("reply target has no RFC Message-ID".into())
                     })?
-                    .to_owned(),
-            ),
-            None => None,
+                    .to_owned();
+                let references = reply_reference_chain(&parent.summary.provider_data);
+                (Some(message_id), references)
+            }
+            None => (None, Vec::new()),
         };
         let raw = self
             .mime
-            .build_reply(&from, &message, reply_message_id.as_deref())
+            .build_reply(
+                &from,
+                &message,
+                reply_message_id.as_deref(),
+                &reply_references,
+            )
             .map_err(mime_provider_error)?;
         let recipients = message
             .to
@@ -2034,19 +2065,24 @@ fn imap_message_summary(
     uid_validity: u64,
     envelope: ImapEnvelope,
 ) -> MessageSummary {
+    let native_id = StableImapId {
+        mailbox: mailbox.to_owned(),
+        uid_validity,
+        uid: envelope.uid,
+    }
+    .to_string();
+    let thread_id = imap_thread_id(
+        account_id,
+        envelope.message_id.as_deref(),
+        &envelope.references,
+        &envelope.in_reply_to,
+    )
+    .or_else(|| Some(imap_singleton_thread_id(account_id, &native_id)));
     MessageSummary {
-        id: normalized_message_id(
-            account_id,
-            &StableImapId {
-                mailbox: mailbox.to_owned(),
-                uid_validity,
-                uid: envelope.uid,
-            }
-            .to_string(),
-        ),
+        id: normalized_message_id(account_id, &native_id),
         account_id: account_id.to_owned(),
         mailbox_id: Some(mailbox.to_owned()),
-        thread_id: None,
+        thread_id,
         subject: envelope.subject,
         author: envelope.from,
         timestamp: envelope.timestamp,
@@ -2060,8 +2096,72 @@ fn imap_message_summary(
             .filter(|flag| !flag.starts_with('\\'))
             .cloned()
             .collect(),
-        provider_data: json!({ "uid": envelope.uid, "messageId": envelope.message_id }),
+        provider_data: json!({
+            "uid": envelope.uid,
+            "messageId": envelope.message_id,
+            "references": envelope.references,
+            "inReplyTo": envelope.in_reply_to,
+        }),
     }
+}
+
+fn imap_thread_id(
+    account_id: &str,
+    message_id: Option<&str>,
+    references: &[String],
+    in_reply_to: &[String],
+) -> Option<String> {
+    // RFC 5256 REFERENCES: use References when valid, otherwise the first
+    // valid In-Reply-To ID, with the message's own ID as a new root.
+    let root = references
+        .iter()
+        .find_map(|value| canonical_rfc_message_id(value))
+        .or_else(|| {
+            in_reply_to
+                .iter()
+                .find_map(|value| canonical_rfc_message_id(value))
+        })
+        .or_else(|| message_id.and_then(canonical_rfc_message_id))?;
+    let name = format!("quickmail:rfc822-thread:{account_id}:{root}");
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes());
+    Some(normalized_message_id(account_id, &format!("thread:{id}")))
+}
+
+fn imap_singleton_thread_id(account_id: &str, native_id: &str) -> String {
+    let name = format!("quickmail:imap-singleton:{account_id}:{native_id}");
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes());
+    normalized_message_id(account_id, &format!("thread:{id}"))
+}
+
+fn canonical_rfc_message_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(value)
+        .trim();
+    if value.is_empty() || value.len() > 998 || value.chars().any(char::is_control) {
+        return None;
+    }
+    let (local, domain) = value.rsplit_once('@')?;
+    if local.is_empty() || domain.is_empty() || domain.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let local = if local.starts_with('"') && local.ends_with('"') && local.len() >= 2 {
+        let mut unquoted = String::with_capacity(local.len() - 2);
+        let mut characters = local[1..local.len() - 1].chars();
+        while let Some(character) = characters.next() {
+            if character == '\\' {
+                unquoted.push(characters.next()?);
+            } else {
+                unquoted.push(character);
+            }
+        }
+        unquoted
+    } else {
+        local.to_owned()
+    };
+    Some(format!("{local}@{}", domain.to_ascii_lowercase()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2299,11 +2399,16 @@ mod tests {
     #[test]
     fn summary_headers_decode_rfc2047_subject_and_author() {
         let headers = parse_summary_headers(
-            b"Subject: =?UTF-8?B?R3LDvMOfZSBhdXMgS8O2bG4=?=\r\nFrom: =?UTF-8?Q?J=C3=B6rg_M=C3=BCller?= <joerg@example.com>\r\nDate: Tue, 01 Sep 2026 10:15:00 +0200\r\nMessage-ID: <encoded@example.com>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
+            b"Subject: =?UTF-8?B?R3LDvMOfZSBhdXMgS8O2bG4=?=\r\nFrom: =?UTF-8?Q?J=C3=B6rg_M=C3=BCller?= <joerg@example.com>\r\nDate: Tue, 01 Sep 2026 10:15:00 +0200\r\nMessage-ID: <encoded@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com> <parent@example.com>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
         );
         assert_eq!(headers.subject, "Grüße aus Köln");
         assert_eq!(headers.from.unwrap().name, "Jörg Müller");
         assert_eq!(headers.message_id.as_deref(), Some("encoded@example.com"));
+        assert_eq!(headers.in_reply_to, ["parent@example.com"]);
+        assert_eq!(
+            headers.references,
+            ["root@example.com", "parent@example.com"]
+        );
         assert_eq!(
             headers.timestamp.unwrap().to_rfc3339(),
             "2026-09-01T08:15:00+00:00"
@@ -2511,6 +2616,8 @@ mod tests {
             snippet: String::new(),
             has_attachments: false,
             message_id: None,
+            in_reply_to: Vec::new(),
+            references: Vec::new(),
         };
         let mut envelopes = vec![envelope(301), envelope(500), envelope(402)];
         sort_envelopes_newest_first(&mut envelopes);
@@ -2530,6 +2637,39 @@ mod tests {
             authentication: true,
         });
         assert!(matches!(error, ProviderError::Authentication(_)));
+    }
+
+    #[test]
+    fn rfc_references_produce_stable_account_scoped_threads() {
+        let none = Vec::new();
+        let root = imap_thread_id("account-a", Some("root@example.com"), &none, &none);
+        let reply = imap_thread_id(
+            "account-a",
+            Some("reply@example.com"),
+            &["root@example.com".into()],
+            &["root@example.com".into()],
+        );
+        let nested_reply = imap_thread_id(
+            "account-a",
+            Some("nested@example.com"),
+            &["root@example.com".into(), "reply@example.com".into()],
+            &["reply@example.com".into()],
+        );
+        assert_eq!(root, reply);
+        assert_eq!(reply, nested_reply);
+        assert_ne!(
+            root,
+            imap_thread_id("account-b", Some("root@example.com"), &none, &none)
+        );
+    }
+
+    #[test]
+    fn rfc_message_id_normalization_handles_quoted_local_parts() {
+        assert_eq!(
+            canonical_rfc_message_id("<\"01KF8JCEOCBS0045PS\"@XXX.YYY.COM>"),
+            Some("01KF8JCEOCBS0045PS@xxx.yyy.com".into())
+        );
+        assert_eq!(canonical_rfc_message_id("not-a-message-id"), None);
     }
 
     #[test]
@@ -2598,6 +2738,7 @@ mod tests {
     #[test]
     fn foreground_summary_fetch_is_headers_only_and_bounded_by_uid_page() {
         assert!(IMAP_SUMMARY_FETCH.contains("HEADER.FIELDS"));
+        assert!(IMAP_SUMMARY_FETCH.contains("IN-REPLY-TO REFERENCES"));
         assert!(!IMAP_SUMMARY_FETCH.contains("BODY.PEEK[TEXT]"));
         assert_eq!(newest_uid_page((1..=10_000).collect(), 0, 201).len(), 201);
     }

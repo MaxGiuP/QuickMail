@@ -17,6 +17,7 @@ QtObject {
         mailboxes: "mailboxes.list",
         mailList: "mail.list",
         mailGet: "mail.get",
+        threadGet: "thread.get",
         mailAction: "mail.action",
         draftSave: "draft.save",
         draftList: "draft.list",

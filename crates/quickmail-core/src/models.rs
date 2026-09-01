@@ -121,6 +121,20 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
 }
 
+/// A bounded, chronological view of one cached mail conversation.
+///
+/// Threads intentionally contain summaries only. Clients fetch the selected
+/// message body with `mail.get`, keeping this response small even for long or
+/// attachment-heavy conversations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadConversation {
+    pub id: ThreadId,
+    pub messages: Vec<MessageSummary>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {

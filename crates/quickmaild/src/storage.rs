@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 use quickmail_core::{
     Account, Address, CalendarEvent, DashboardSnapshot, DraftRecord, DraftSaved, MailAction,
     Mailbox, MailboxRole, MailboxSyncPage, Message, MessagePage, MessageQuery, MessageSummary,
-    OutgoingMessage, SyncStatus, Task,
+    OutgoingMessage, SyncStatus, Task, ThreadConversation,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, named_params, params};
 use serde_json::Value;
@@ -15,8 +15,9 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_PAGE_SIZE: u32 = 200;
+const MAX_THREAD_MESSAGES: usize = 100;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -231,6 +232,20 @@ impl Database {
             .await
     }
 
+    pub async fn thread_metadata_backfill_ids(
+        &self,
+        account_id: &str,
+        mailbox_id: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        let account_id = account_id.to_owned();
+        let mailbox_id = mailbox_id.to_owned();
+        self.call(move |repository| {
+            repository.thread_metadata_backfill_ids(&account_id, &mailbox_id, limit)
+        })
+        .await
+    }
+
     pub async fn get_message(&self, id: &str) -> Result<Option<Message>, StorageError> {
         Ok(self
             .get_cached_message(id)
@@ -244,6 +259,12 @@ impl Database {
     ) -> Result<Option<(Message, bool)>, StorageError> {
         let id = id.to_owned();
         self.call(move |repository| repository.get_cached_message(&id))
+            .await
+    }
+
+    pub async fn get_thread(&self, message_id: &str) -> Result<ThreadConversation, StorageError> {
+        let message_id = message_id.to_owned();
+        self.call(move |repository| repository.get_thread(&message_id))
             .await
     }
 
@@ -263,6 +284,18 @@ impl Database {
     ) -> Result<(), StorageError> {
         let operation_id = operation_id.to_owned();
         self.call(move |repository| repository.finish_operation(&operation_id, result))
+            .await
+    }
+
+    pub async fn finish_mail_action(
+        &self,
+        operation_id: &str,
+        action: &MailAction,
+        result: Result<(), String>,
+    ) -> Result<u64, StorageError> {
+        let operation_id = operation_id.to_owned();
+        let action = action.clone();
+        self.call(move |repository| repository.finish_mail_action(&operation_id, &action, result))
             .await
     }
 
@@ -976,6 +1009,26 @@ impl Repository {
         })
     }
 
+    fn thread_metadata_backfill_ids(
+        &self,
+        account_id: &str,
+        mailbox_id: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id FROM messages
+             WHERE account_id=?1 AND mailbox_id=?2
+               AND (thread_id IS NULL OR TRIM(thread_id)='')
+             ORDER BY updated_at ASC, id ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![account_id, mailbox_id, limit.clamp(1, MAX_PAGE_SIZE)],
+            |row| row.get(0),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     fn get_cached_message(&self, id: &str) -> Result<Option<(Message, bool)>, StorageError> {
         let connection = &self.connection;
         let mut statement = connection.prepare_cached(
@@ -986,27 +1039,84 @@ impl Repository {
              FROM messages WHERE id = ?1",
         )?;
         let message = statement
-            .query_row([id], |row| {
-                let summary = message_summary_from_row(row)?;
-                let message = Message {
-                    summary,
-                    to: json_column(row, 14)?,
-                    cc: json_column(row, 15)?,
-                    bcc: json_column(row, 16)?,
-                    body_text: row.get(17)?,
-                    body_html: row.get(18)?,
-                    attachments: json_column(row, 19)?,
-                };
-                Ok((message, row.get(20)?))
-            })
+            .query_row([id], cached_message_from_row)
             .optional()?;
         Ok(message)
+    }
+
+    fn get_thread(&self, message_id: &str) -> Result<ThreadConversation, StorageError> {
+        let (anchor, _) = self
+            .get_cached_message(message_id)?
+            .ok_or(StorageError::NotFound)?;
+        let Some(thread_id) = anchor
+            .summary
+            .thread_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(ThreadConversation {
+                id: anchor.summary.id.clone(),
+                messages: vec![anchor.summary],
+                truncated: false,
+            });
+        };
+
+        // One IMAP message can be cached under multiple mailbox-scoped UIDs
+        // (notably Gmail's INBOX and All Mail). Collapse those physical copies
+        // by RFC Message-ID before applying the response bound. Ranking the
+        // requested copy first also guarantees that an old selected message is
+        // retained when the conversation has more than the response limit.
+        let mut statement = self.connection.prepare_cached(
+            "WITH ranked AS (
+               SELECT id, account_id, mailbox_id, thread_id, subject, author_name,
+                      author_address, timestamp_ms, is_read, starred, snippet,
+                      has_attachments, labels_json, provider_data_json,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(
+                          NULLIF(TRIM(CAST(json_extract(
+                            provider_data_json, '$.messageId') AS TEXT)), ''), id)
+                        ORDER BY CASE WHEN id=?3 THEN 0 ELSE 1 END,
+                                 timestamp_ms DESC, id DESC
+                      ) AS copy_rank
+               FROM messages
+               WHERE account_id=?1 AND thread_id=?2
+             )
+             SELECT id, account_id, mailbox_id, thread_id, subject, author_name,
+                    author_address, timestamp_ms, is_read, starred, snippet,
+                    has_attachments, labels_json, provider_data_json
+             FROM ranked
+             WHERE copy_rank=1
+             ORDER BY CASE WHEN id=?3 THEN 0 ELSE 1 END, timestamp_ms DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                anchor.summary.account_id,
+                thread_id,
+                message_id,
+                (MAX_THREAD_MESSAGES + 1) as i64
+            ],
+            message_summary_from_row,
+        )?;
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = messages.len() > MAX_THREAD_MESSAGES;
+        messages.truncate(MAX_THREAD_MESSAGES);
+        messages.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(ThreadConversation {
+            id: thread_id.to_owned(),
+            messages,
+            truncated,
+        })
     }
 
     fn apply_mail_action(&mut self, action: &MailAction) -> Result<(String, u64), StorageError> {
         let connection = &mut self.connection;
         let transaction = connection.transaction()?;
-        apply_action_locally(&transaction, action)?;
+        validate_mail_action(action)?;
         let operation_id = Uuid::new_v4().to_string();
         transaction.execute(
             "INSERT INTO operations (id, kind, payload_json, state, created_at)
@@ -1039,6 +1149,36 @@ impl Repository {
             return Err(StorageError::NotFound);
         }
         Ok(())
+    }
+
+    fn finish_mail_action(
+        &mut self,
+        operation_id: &str,
+        action: &MailAction,
+        result: Result<(), String>,
+    ) -> Result<u64, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let succeeded = result.is_ok();
+        let (state, error) = match result {
+            Ok(()) => ("succeeded", None),
+            Err(error) => ("failed", Some(error)),
+        };
+        let changed = transaction.execute(
+            "UPDATE operations SET state=?2, attempted_at=?3, last_error=?4 WHERE id=?1",
+            params![operation_id, state, Utc::now().timestamp_millis(), error],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::NotFound);
+        }
+
+        let revision = if succeeded {
+            apply_action_locally(&transaction, action)?;
+            bump_revision(&transaction)?
+        } else {
+            read_revision(&transaction)?
+        };
+        transaction.commit()?;
+        Ok(revision)
     }
 
     fn queue_outgoing(&mut self, message: &OutgoingMessage) -> Result<(String, u64), StorageError> {
@@ -1487,6 +1627,9 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                ON messages(account_id, timestamp_ms DESC, id DESC);
              CREATE INDEX idx_messages_account_mailbox_page
                ON messages(account_id, mailbox_id, timestamp_ms DESC, id DESC);
+             CREATE INDEX idx_messages_account_thread
+               ON messages(account_id, thread_id, timestamp_ms, id)
+               WHERE thread_id IS NOT NULL;
              CREATE INDEX idx_messages_unread_page
                ON messages(is_read, timestamp_ms DESC, id DESC);
              CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -1537,10 +1680,10 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                message_json TEXT NOT NULL, updated_at INTEGER NOT NULL
              );
              CREATE INDEX idx_drafts_account_updated ON drafts(account_id, updated_at DESC, id);
-             PRAGMA user_version=4;
+             PRAGMA user_version=5;
              COMMIT;",
         )?;
-        version = 4;
+        version = 5;
     }
     if version == 1 {
         connection.execute_batch(
@@ -1578,8 +1721,42 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
              PRAGMA user_version=4;
              COMMIT;",
         )?;
+        version = 4;
+    }
+    if version == 4 {
+        if table_has_column(connection, "messages", "account_id")?
+            && table_has_column(connection, "messages", "thread_id")?
+            && table_has_column(connection, "messages", "timestamp_ms")?
+        {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE INDEX IF NOT EXISTS idx_messages_account_thread
+                   ON messages(account_id, thread_id, timestamp_ms, id)
+                   WHERE thread_id IS NOT NULL;
+                 PRAGMA user_version=5;
+                 COMMIT;",
+            )?;
+        } else {
+            // Early development schema fixtures did not yet include the mail
+            // metadata columns. They remain readable for account recovery,
+            // but cannot benefit from the optional thread index.
+            connection.pragma_update(None, "user_version", 5)?;
+        }
     }
     Ok(())
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, StorageError> {
+    let mut statement =
+        connection.prepare("SELECT name FROM pragma_table_info(?1) WHERE name=?2")?;
+    Ok(statement
+        .query_row(params![table, column], |_| Ok(()))
+        .optional()?
+        .is_some())
 }
 
 fn message_summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
@@ -1607,6 +1784,20 @@ fn message_summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         labels: json_column(row, 12)?,
         provider_data: json_column(row, 13)?,
     })
+}
+
+fn cached_message_from_row(row: &Row<'_>) -> rusqlite::Result<(Message, bool)> {
+    let summary = message_summary_from_row(row)?;
+    let message = Message {
+        summary,
+        to: json_column(row, 14)?,
+        cc: json_column(row, 15)?,
+        bcc: json_column(row, 16)?,
+        body_text: row.get(17)?,
+        body_html: row.get(18)?,
+        attachments: json_column(row, 19)?,
+    };
+    Ok((message, row.get(20)?))
 }
 
 fn account_config_from_row(row: &Row<'_>) -> rusqlite::Result<(Account, Value)> {
@@ -1826,15 +2017,11 @@ fn apply_action_locally(
             return Ok(());
         }
         MailAction::Archive { message_ids } | MailAction::Trash { message_ids } => {
-            // The provider resolves its role-specific destination. Keep the cache
-            // unchanged until that operation succeeds and sync returns its result.
-            return if message_ids.is_empty() {
-                Err(StorageError::InvalidData(
-                    "mail action has no message ids".into(),
-                ))
-            } else {
-                Ok(())
-            };
+            let mut statement = transaction.prepare_cached("DELETE FROM messages WHERE id=?1")?;
+            for id in message_ids {
+                statement.execute([id])?;
+            }
+            return Ok(());
         }
     };
     if ids.is_empty() {
@@ -1845,6 +2032,30 @@ fn apply_action_locally(
     let mut statement = transaction.prepare_cached(sql)?;
     for id in ids {
         statement.execute(params![id, boolean])?;
+    }
+    Ok(())
+}
+
+fn validate_mail_action(action: &MailAction) -> Result<(), StorageError> {
+    let ids = match action {
+        MailAction::MarkRead { message_ids, .. }
+        | MailAction::Star { message_ids, .. }
+        | MailAction::Archive { message_ids }
+        | MailAction::Trash { message_ids }
+        | MailAction::Move { message_ids, .. }
+        | MailAction::SetLabels { message_ids, .. } => message_ids,
+    };
+    if ids.is_empty() {
+        return Err(StorageError::InvalidData(
+            "mail action has no message ids".into(),
+        ));
+    }
+    if let MailAction::Move { mailbox_id, .. } = action
+        && mailbox_id.trim().is_empty()
+    {
+        return Err(StorageError::InvalidData(
+            "mail move has no destination mailbox".into(),
+        ));
     }
     Ok(())
 }
@@ -2184,6 +2395,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_lookup_is_account_scoped_chronological_and_bounded() {
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account()).await.unwrap();
+
+        let mut newest = message(3);
+        newest.summary.thread_id = Some("account-1:thread:root@example.com".into());
+        newest.summary.provider_data = json!({"messageId": "newest@example.com"});
+        let mut oldest = message(1);
+        oldest.summary.thread_id = newest.summary.thread_id.clone();
+        oldest.summary.provider_data = json!({"messageId": "oldest@example.com"});
+        let mut duplicate = newest.clone();
+        duplicate.summary.id = "account-1:all-mail-copy".into();
+        duplicate.summary.mailbox_id = Some("all-mail".into());
+        let unrelated = message(2);
+        database
+            .upsert_messages(&[newest.clone(), duplicate, unrelated, oldest.clone()])
+            .await
+            .unwrap();
+
+        let thread = database.get_thread(&newest.summary.id).await.unwrap();
+        assert_eq!(thread.id, "account-1:thread:root@example.com");
+        assert_eq!(
+            thread
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            [oldest.summary.id.as_str(), newest.summary.id.as_str()]
+        );
+        assert!(!thread.truncated);
+
+        let singleton = database
+            .get_thread("account-1:message-00002")
+            .await
+            .unwrap();
+        assert_eq!(singleton.messages.len(), 1);
+        assert_eq!(singleton.id, "account-1:message-00002");
+        assert!(matches!(
+            database.get_thread("account-1:missing").await,
+            Err(StorageError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_thread_always_retains_an_old_anchor() {
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account()).await.unwrap();
+        let messages = (0..105)
+            .map(|index| {
+                let mut item = message(index);
+                item.summary.thread_id = Some("account-1:thread:long".into());
+                item.summary.provider_data =
+                    json!({"messageId": format!("message-{index}@example.com")});
+                item
+            })
+            .collect::<Vec<_>>();
+        let anchor_id = messages[0].summary.id.clone();
+        database.upsert_messages(&messages).await.unwrap();
+
+        let thread = database.get_thread(&anchor_id).await.unwrap();
+        assert!(thread.truncated);
+        assert_eq!(thread.messages.len(), MAX_THREAD_MESSAGES);
+        assert!(
+            thread
+                .messages
+                .iter()
+                .any(|message| message.id == anchor_id)
+        );
+        assert_eq!(thread.messages.first().unwrap().id, anchor_id);
+        assert_eq!(
+            thread.messages.last().unwrap().id,
+            messages.last().unwrap().summary.id
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_metadata_backfill_advances_after_reconciliation() {
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account()).await.unwrap();
+        let messages = (0..70).map(message).collect::<Vec<_>>();
+        database.upsert_messages(&messages).await.unwrap();
+
+        let first = database
+            .thread_metadata_backfill_ids("account-1", "inbox", 8)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 8);
+        assert!(first.contains(&messages[0].summary.id));
+        let mut reconciled = first
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut summary = messages[index].summary.clone();
+                summary.id = id.clone();
+                summary.thread_id = Some(format!("account-1:thread:{index}"));
+                summary
+            })
+            .collect::<Vec<_>>();
+        // Retain deterministic IDs even if row ordering changes in the
+        // future; only the newly populated thread field matters here.
+        reconciled.sort_by(|left, right| left.id.cmp(&right.id));
+        database
+            .upsert_message_summaries(&reconciled)
+            .await
+            .unwrap();
+
+        let second = database
+            .thread_metadata_backfill_ids("account-1", "inbox", 8)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 8);
+        assert!(second.iter().all(|id| !first.contains(id)));
+    }
+
+    #[tokio::test]
     async fn mailbox_sync_cursor_is_atomic_scoped_and_resets_uid_generation() {
         let database = Database::open_in_memory().unwrap();
         database.upsert_account(&account()).await.unwrap();
@@ -2387,19 +2713,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mail_actions_are_optimistic_and_revisioned() {
+    async fn mail_actions_apply_to_cache_only_after_provider_confirmation() {
         let database = Database::open_in_memory().unwrap();
         database.upsert_account(&account()).await.unwrap();
         database.upsert_messages(&[message(1)]).await.unwrap();
         let before = database.revision().await.unwrap();
-        let (_operation_id, after) = database
+        let (operation_id, queued) = database
             .apply_mail_action(&MailAction::MarkRead {
                 message_ids: vec!["account-1:message-00001".into()],
                 read: true,
             })
             .await
             .unwrap();
-        assert_eq!(after, before + 1);
+        assert_eq!(queued, before + 1);
+        assert!(
+            !database
+                .get_message("account-1:message-00001")
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .read
+        );
+        let action = MailAction::MarkRead {
+            message_ids: vec!["account-1:message-00001".into()],
+            read: true,
+        };
+        let completed = database
+            .finish_mail_action(&operation_id, &action, Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(completed, queued + 1);
         assert!(
             database
                 .get_message("account-1:message-00001")
@@ -2408,6 +2752,63 @@ mod tests {
                 .unwrap()
                 .summary
                 .read
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_archive_and_trash_remove_cache_but_failures_do_not() {
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account()).await.unwrap();
+        let archived = message(1);
+        let failed_trash = message(2);
+        database
+            .upsert_messages(&[archived.clone(), failed_trash.clone()])
+            .await
+            .unwrap();
+
+        let archive_action = MailAction::Archive {
+            message_ids: vec![archived.summary.id.clone()],
+        };
+        let (archive_operation, queued_revision) =
+            database.apply_mail_action(&archive_action).await.unwrap();
+        assert!(
+            database
+                .get_message(&archived.summary.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let completed_revision = database
+            .finish_mail_action(&archive_operation, &archive_action, Ok(()))
+            .await
+            .unwrap();
+        assert!(completed_revision > queued_revision);
+        assert!(
+            database
+                .get_message(&archived.summary.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let trash_action = MailAction::Trash {
+            message_ids: vec![failed_trash.summary.id.clone()],
+        };
+        let (trash_operation, _) = database.apply_mail_action(&trash_action).await.unwrap();
+        database
+            .finish_mail_action(
+                &trash_operation,
+                &trash_action,
+                Err("provider rejected move".into()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            database
+                .get_message(&failed_trash.summary.id)
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 
@@ -2477,11 +2878,15 @@ mod tests {
                 read: true,
             })
             .unwrap();
+        let second_account_action = MailAction::Star {
+            message_ids: vec!["account-2:message-00002".into()],
+            starred: true,
+        };
+        let (second_account_operation, _) = repository
+            .apply_mail_action(&second_account_action)
+            .unwrap();
         repository
-            .apply_mail_action(&MailAction::Star {
-                message_ids: vec!["account-2:message-00002".into()],
-                starred: true,
-            })
+            .finish_mail_action(&second_account_operation, &second_account_action, Ok(()))
             .unwrap();
 
         // Existing databases may still contain the former full outgoing

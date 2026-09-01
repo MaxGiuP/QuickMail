@@ -42,6 +42,10 @@ Item {
         }]
         property var folders: [{ id: "inbox", name: root.marker, unread: 1 }]
         property var messages: [selectedMessage]
+        property var conversations: messages
+        property var threadMessages: [selectedMessage]
+        property bool threadLoading: false
+        property bool threadTruncated: false
         property var recentMail: []
         property var tasks: []
         property var events: []
@@ -101,6 +105,7 @@ Item {
         readonly property bool hasMore: false
 
         function messageId(message) { return String(message && message.id || "") }
+        function threadKey(message) { return messageId(message) }
         function messageBodyText(message) { return String(message && message.bodyText || "") }
         function selectFolder(folderId) { activeFolderId = String(folderId) }
         function selectAccount(accountId) { activeAccountId = String(accountId) }
@@ -110,6 +115,7 @@ Item {
         function sync(callback) { if (callback) callback({}, null) }
         function search(query) { searchText = String(query) }
         function openMessage(message) { selectedMessage = message }
+        function openThreadMessage(message) { selectedMessage = message }
         function toggleStar(message) {}
         function archive(message) {}
         function trash(message) {}

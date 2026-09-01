@@ -16,6 +16,7 @@ pub mod method {
     pub const MAIL_LIST: &str = "mail.list";
     pub const MAILBOXES_LIST: &str = "mailboxes.list";
     pub const MAIL_GET: &str = "mail.get";
+    pub const THREAD_GET: &str = "thread.get";
     pub const MAIL_ACTION: &str = "mail.action";
     pub const MAIL_SEND: &str = "mail.send";
     pub const DRAFT_SAVE: &str = "draft.save";

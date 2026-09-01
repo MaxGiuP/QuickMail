@@ -4,18 +4,22 @@ Email is hostile input. QuickMail treats every remote field, MIME part,
 attachment name, calendar invitation, and authorization response as
 untrusted.
 
-- Google refresh credentials remain in GNOME Online Accounts. QuickMail asks
-  only for short-lived access tokens over the session D-Bus and never copies
-  them into its database or keyring.
-- Generic IMAP/SMTP passwords are stored only in Secret Service.
+- Google and Microsoft refresh credentials remain in GNOME Online Accounts.
+  QuickMail asks only for short-lived access tokens over the session D-Bus and
+  never copies them into its database or keyring. Current `ms_graph` tokens are
+  sent only to the HTTPS Microsoft Graph API host; legacy `windows_live` tokens
+  stay on the TLS IMAP/SMTP endpoints and capabilities advertised by GOA.
+- Generic and manual Exchange IMAP/SMTP passwords are stored only in Secret
+  Service.
 - The database, attachment cache, and runtime directories are mode `0700`;
   database, WAL/SHM, socket, and attachment files are mode `0600`.
 - The local socket checks peer ownership and enforces a request-size limit.
 - HTML bodies render through Qt's non-browser rich-text engine after an HTML5
   allowlist sanitizer strips executable/interactive markup, relative and local
-  resource URLs, and non-presentation CSS. Remote HTTP/HTTPS images load by
-  default at the user's request and can be disabled persistently from the
-  reader settings; plain text remains the fallback.
+  resource URLs, and non-presentation CSS. A client-side defense-in-depth pass
+  retains presentation colors while rejecting CSS resource functions. Remote
+  HTTP/HTTPS images load by default at the user's request and can be disabled
+  persistently from the reader settings; plain text remains the fallback.
 - Remote images are fetched directly by Qt from sender-selected HTTP(S) URLs.
   Loading them can disclose that a message was opened and can issue requests
   to HTTP services reachable from the machine, including private-network

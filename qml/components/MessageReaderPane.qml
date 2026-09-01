@@ -15,6 +15,7 @@ Rectangle {
     property string pendingSaveSource: ""
     property bool htmlRenderFailed: false
     signal backRequested()
+    signal composeRequested(string mode, var message)
 
     color: Theme.surface
 
@@ -28,12 +29,25 @@ Rectangle {
     readonly property string bodyText: store.messageBodyText(message)
     readonly property string bodyHtml: String(message.bodyHtml || message.body_html || "")
     readonly property bool hasHtmlBody: bodyHtml.trim() !== ""
+    readonly property string renderedBodyHtml: hasHtmlBody ? htmlLoader.loadedHtml : ""
+    readonly property int threadCount: Array.isArray(store.threadMessages)
+        ? store.threadMessages.length : 0
     readonly property string timestampText: formatTimestamp(message.date_display
         || message.received_display || message.timestamp || message.received_at || "")
 
     function addressList(value) {
         if (!Array.isArray(value)) return String(value || "")
         return value.map(entry => entry.name || entry.address || "").filter(Boolean).join(", ")
+    }
+
+    function threadSender(item) {
+        return String(item && (item.from_name || item.sender_name
+            || (item.author && (item.author.name || item.author.address))
+            || item.from || item.from_address) || "Unknown sender")
+    }
+
+    function threadSelected(item) {
+        return store.messageId(item) === store.messageId(store.selectedMessage)
     }
 
     function humanSize(value) {
@@ -204,13 +218,129 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: root.message.subject || "(No subject)"
+                    text: (root.message.subject || "(No subject)")
+                        + (root.threadCount > 1 ? "  (" + root.threadCount + ")" : "")
                     textFormat: Text.PlainText
                     color: Theme.text
                     font.family: Theme.fontFamily
                     font.pixelSize: 26
                     font.weight: Font.DemiBold
                     wrapMode: Text.WordWrap
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: store.threadLoading || root.threadCount > 1
+                    spacing: 4
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: store.threadLoading || root.threadCount > 1
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.threadCount > 1
+                                ? root.threadCount + " messages in this conversation"
+                                : "Loading conversation…"
+                            textFormat: Text.PlainText
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 11
+                        }
+                        BusyIndicator {
+                            visible: store.threadLoading
+                            running: visible
+                            Layout.preferredWidth: 20
+                            Layout.preferredHeight: 20
+                        }
+                    }
+
+                    Repeater {
+                        model: store.threadMessages
+                        delegate: Rectangle {
+                            id: threadCard
+                            required property var modelData
+                            required property int index
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 56
+                            radius: Theme.radiusSmall
+                            color: root.threadSelected(modelData)
+                                ? Theme.surfaceSelected : Theme.surfaceRaised
+                            border.width: root.threadSelected(modelData) ? 1 : 0
+                            border.color: Theme.accent
+
+                            Behavior on color {
+                                ColorAnimation { duration: 140 }
+                            }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 10
+                                Rectangle {
+                                    Layout.preferredWidth: 30
+                                    Layout.preferredHeight: 30
+                                    radius: 15
+                                    color: Theme.accentSoft
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: Theme.initials(root.threadSender(threadCard.modelData))
+                                        textFormat: Text.PlainText
+                                        color: Theme.accent
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 10
+                                        font.weight: Font.Bold
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 1
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.threadSender(threadCard.modelData)
+                                        textFormat: Text.PlainText
+                                        color: Theme.text
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 12
+                                        font.weight: Font.DemiBold
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: String(threadCard.modelData.snippet || "")
+                                        textFormat: Text.PlainText
+                                        color: Theme.textMuted
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                Text {
+                                    text: root.formatTimestamp(threadCard.modelData.timestamp
+                                        || threadCard.modelData.received_at || "")
+                                    textFormat: Text.PlainText
+                                    color: Theme.textMuted
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 10
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.store.openThreadMessage(threadCard.modelData)
+                            }
+                        }
+                    }
+
+                    Text {
+                        visible: store.threadTruncated
+                        text: "Showing a 100-message window that keeps your selected message"
+                        textFormat: Text.PlainText
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 10
+                    }
                 }
 
                 RowLayout {
@@ -279,19 +409,22 @@ Rectangle {
                 Loader {
                     id: htmlLoader
                     property real renderedHeight: 160
+                    property string loadedHtml: ""
                     Layout.fillWidth: true
                     Layout.preferredHeight: renderedHeight
                     visible: !store.readerLoading && root.hasHtmlBody && !root.htmlRenderFailed
                     active: root.hasHtmlBody && !root.htmlRenderFailed
-                    source: "HtmlMessageView.qml"
-
-                    onLoaded: {
-                        item.foregroundColor = Theme.text
-                        item.mutedColor = Theme.textMuted
-                        item.linkColor = Theme.accent
-                        item.pageColor = Theme.surface
-                        item.allowRemoteContent = AppSettings.allowRemoteContent
-                        item.html = root.bodyHtml
+                    sourceComponent: Component {
+                        HtmlMessageView {
+                            html: root.bodyHtml
+                            foregroundColor: Theme.text
+                            mutedColor: Theme.textMuted
+                            linkColor: Theme.accent
+                            pageColor: Theme.surface
+                            allowRemoteContent: AppSettings.allowRemoteContent
+                            onHtmlChanged: htmlLoader.loadedHtml = html
+                            Component.onCompleted: htmlLoader.loadedHtml = html
+                        }
                     }
                     onStatusChanged: {
                         if (status === Loader.Error) root.htmlRenderFailed = true
@@ -307,14 +440,6 @@ Rectangle {
                     }
                     function onExternalLinkRequested(url) {
                         Qt.openUrlExternally(url)
-                    }
-                }
-
-                Connections {
-                    target: AppSettings
-                    function onAllowRemoteContentChanged() {
-                        if (htmlLoader.item)
-                            htmlLoader.item.allowRemoteContent = AppSettings.allowRemoteContent
                     }
                 }
 
@@ -426,17 +551,17 @@ Rectangle {
                     PrimaryButton {
                         text: "Reply"
                         iconName: "reply"
-                        onClicked: store.startCompose("reply", root.message)
+                        onClicked: root.composeRequested("reply", root.message)
                     }
                     PrimaryButton {
                         text: "Reply all"
                         iconName: "replyAll"
-                        onClicked: store.startCompose("reply_all", root.message)
+                        onClicked: root.composeRequested("reply_all", root.message)
                     }
                     PrimaryButton {
                         text: "Forward"
                         iconName: "forward"
-                        onClicked: store.startCompose("forward", root.message)
+                        onClicked: root.composeRequested("forward", root.message)
                     }
                 }
             }
@@ -469,9 +594,9 @@ Rectangle {
         onRejected: root.pendingSaveSource = ""
     }
 
-    Shortcut { sequence: "R"; enabled: store.selectedMessage !== null; onActivated: store.startCompose("reply", root.message) }
-    Shortcut { sequence: "A"; enabled: store.selectedMessage !== null; onActivated: store.startCompose("reply_all", root.message) }
-    Shortcut { sequence: "F"; enabled: store.selectedMessage !== null; onActivated: store.startCompose("forward", root.message) }
+    Shortcut { sequence: "R"; enabled: store.selectedMessage !== null; onActivated: root.composeRequested("reply", root.message) }
+    Shortcut { sequence: "A"; enabled: store.selectedMessage !== null; onActivated: root.composeRequested("reply_all", root.message) }
+    Shortcut { sequence: "F"; enabled: store.selectedMessage !== null; onActivated: root.composeRequested("forward", root.message) }
     Shortcut { sequence: "E"; enabled: store.selectedMessage !== null; onActivated: store.archive(root.message) }
     Shortcut { sequence: "S"; enabled: store.selectedMessage !== null; onActivated: store.toggleStar(root.message) }
     Shortcut { sequence: "Delete"; enabled: store.selectedMessage !== null; onActivated: store.trash(root.message) }
