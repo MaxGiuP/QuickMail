@@ -459,8 +459,8 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 68
-            Layout.leftMargin: 10
-            Layout.rightMargin: 10
+            Layout.leftMargin: Theme.space4
+            Layout.rightMargin: Theme.space4
             spacing: 9
 
             Button {
@@ -602,8 +602,8 @@ Rectangle {
 
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: root.compactLayout ? 10 : 16
-                    anchors.rightMargin: root.compactLayout ? 10 : 16
+                    anchors.leftMargin: root.compactLayout ? Theme.space3 : Theme.space4
+                    anchors.rightMargin: root.compactLayout ? Theme.space3 : Theme.space4
                     anchors.topMargin: 10
                     anchors.bottomMargin: 10
                     spacing: 6
@@ -833,8 +833,8 @@ Rectangle {
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 66
-                        Layout.leftMargin: 14
-                        Layout.rightMargin: 12
+                        Layout.leftMargin: Theme.space4
+                        Layout.rightMargin: Theme.space4
                         spacing: 10
 
                         ColumnLayout {
@@ -957,7 +957,7 @@ Rectangle {
                         ListView {
                             id: agendaList
                             anchors.fill: parent
-                            anchors.margins: root.compactLayout ? 8 : 12
+                            anchors.margins: Theme.space3
                             visible: root.activeTab === 0 && root.selectedAgenda.length > 0
                             model: root.selectedAgenda
                             spacing: 7
@@ -984,7 +984,7 @@ Rectangle {
                         ListView {
                             id: taskList
                             anchors.fill: parent
-                            anchors.margins: root.compactLayout ? 8 : 12
+                            anchors.margins: Theme.space3
                             visible: root.activeTab === 1 && root.taskItems.length > 0
                             model: root.taskItems
                             spacing: 7
@@ -1012,8 +1012,8 @@ Rectangle {
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 60
-                        Layout.leftMargin: 12
-                        Layout.rightMargin: 12
+                        Layout.leftMargin: Theme.space4
+                        Layout.rightMargin: Theme.space4
                         spacing: 8
 
                         PrimaryButton {

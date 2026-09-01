@@ -17,6 +17,20 @@ Item {
         Qt.exit(1)
     }
 
+    function descendantsWithName(object, name, result) {
+        if (!object) return
+        if (object.objectName === name) result.push(object)
+        const children = object.children || []
+        for (let index = 0; index < children.length; ++index)
+            descendantsWithName(children[index], name, result)
+    }
+
+    function named(object, name) {
+        const result = []
+        descendantsWithName(object, name, result)
+        return result
+    }
+
     QtObject {
         id: store
 
@@ -63,6 +77,18 @@ Item {
         running: true
         repeat: false
         onTriggered: {
+            const editors = root.named(composer, "composeBodyEditor")
+            root.expect(editors.length === 1,
+                "could not inspect the message editor spacing")
+            if (editors.length === 1) {
+                const editor = editors[0]
+                root.expect(editor.x >= Theme.space4,
+                    "message text is too close to the left edge")
+                root.expect(editor.parent.width - editor.x - editor.width
+                        >= Theme.space4,
+                    "message text is too close to the right edge")
+            }
+
             root.expect(composer.editorBodyText === root.originalBody,
                 "plain draft line breaks or literal markup changed on load")
             root.expect(composer.editorBodyHtml.indexOf("&lt;literal&gt;") >= 0

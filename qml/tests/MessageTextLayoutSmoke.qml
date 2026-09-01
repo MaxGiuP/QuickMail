@@ -131,6 +131,18 @@ ApplicationWindow {
             window.expect(messageRow.snippet.indexOf("First preview line Second preview line Third") === 0,
                 "the message preview was not normalized")
 
+            const rowContents = window.named(messageRow, "messageRowContent")
+            window.expect(rowContents.length === 1,
+                "could not inspect the message-row spacing")
+            if (rowContents.length === 1) {
+                const rowContent = rowContents[0]
+                window.expect(rowContent.x >= Theme.space3,
+                    "message text is too close to the left edge")
+                window.expect(messageRow.width - rowContent.x - rowContent.width
+                        >= Theme.space3,
+                    "message text is too close to the right edge")
+            }
+
             const rowNames = ["messageRowSender", "messageRowSubject", "messageRowSnippet"]
             for (let rowIndex = 0; rowIndex < rowNames.length; ++rowIndex) {
                 const labels = window.named(messageRow, rowNames[rowIndex])

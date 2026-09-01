@@ -501,8 +501,8 @@ Rectangle {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 6
-                anchors.rightMargin: 4
+                anchors.leftMargin: Theme.space2
+                anchors.rightMargin: Theme.space2
                 spacing: 2
 
                 Button {
@@ -747,8 +747,8 @@ Rectangle {
 
                     Flickable {
                         anchors.fill: parent
-                        anchors.leftMargin: 8
-                        anchors.rightMargin: 8
+                        anchors.leftMargin: Theme.space4
+                        anchors.rightMargin: Theme.space4
                         contentWidth: formatRow.implicitWidth
                         contentHeight: height
                         clip: true
@@ -876,11 +876,12 @@ Rectangle {
 
                 RichTextArea {
                     id: bodyField
+                    objectName: "composeBodyEditor"
                     Layout.fillWidth: true
                     Layout.preferredHeight: Math.max(180, root.height
                         - (AppSettings.composeFormattingExpanded ? 346 : 300))
-                    Layout.leftMargin: 8
-                    Layout.rightMargin: 8
+                    Layout.leftMargin: Theme.space4
+                    Layout.rightMargin: Theme.space4
                     Layout.topMargin: 6
                     placeholderText: "Write a message…"
                     placeholderTextColor: Theme.textMuted
@@ -900,8 +901,8 @@ Rectangle {
             visible: !root.minimized
             Layout.fillWidth: true
             Layout.preferredHeight: 58
-            Layout.leftMargin: 12
-            Layout.rightMargin: 10
+            Layout.leftMargin: Theme.space4
+            Layout.rightMargin: Theme.space4
             spacing: 10
 
             PrimaryButton {

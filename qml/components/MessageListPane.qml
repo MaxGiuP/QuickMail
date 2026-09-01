@@ -48,8 +48,8 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 64
-            Layout.leftMargin: 12
-            Layout.rightMargin: 8
+            Layout.leftMargin: Theme.space4
+            Layout.rightMargin: Theme.space4
             spacing: 8
             IconButton {
                 visible: root.mobile
@@ -92,8 +92,8 @@ Rectangle {
         LightSearchField {
             id: search
             Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
+            Layout.leftMargin: Theme.space4
+            Layout.rightMargin: Theme.space4
             Layout.bottomMargin: 10
             onSubmitted: query => root.store.search(query)
         }
@@ -123,12 +123,12 @@ Rectangle {
                 anchors.fill: parent
                 visible: store.loading && store.messages.length === 0
                 spacing: 4
-                padding: 8
+                padding: Theme.space3
                 Repeater {
                     model: 7
                     Rectangle {
                         required property int index
-                        width: parent.width - 16
+                        width: parent.width - Theme.space6
                         height: 78
                         radius: Theme.radiusSmall
                         color: index % 2 === 0 ? Theme.surface : Theme.surfaceRaised
@@ -140,7 +140,7 @@ Rectangle {
             ListView {
                 id: messageList
                 anchors.fill: parent
-                anchors.margins: 6
+                anchors.margins: Theme.space2
                 visible: store.messages.length > 0
                 model: store.conversations
                 spacing: 2

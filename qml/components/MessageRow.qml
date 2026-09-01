@@ -51,9 +51,10 @@ Rectangle {
         : rowMouse.containsMouse ? Theme.surfaceHover : "transparent"
 
     RowLayout {
+        objectName: "messageRowContent"
         anchors.fill: parent
-        anchors.leftMargin: 12
-        anchors.rightMargin: 8
+        anchors.leftMargin: Theme.space3
+        anchors.rightMargin: Theme.space3
         anchors.topMargin: 8
         anchors.bottomMargin: 8
         spacing: 10

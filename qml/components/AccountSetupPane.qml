@@ -176,8 +176,8 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 62
-            Layout.leftMargin: 10
-            Layout.rightMargin: 14
+            Layout.leftMargin: Theme.space4
+            Layout.rightMargin: Theme.space4
             IconButton {
                 visible: store.accounts.length > 0
                 iconName: "back"

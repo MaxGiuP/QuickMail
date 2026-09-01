@@ -46,8 +46,8 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 64
-            Layout.leftMargin: 10
-            Layout.rightMargin: 12
+            Layout.leftMargin: Theme.space4
+            Layout.rightMargin: Theme.space4
             spacing: 8
             IconButton {
                 visible: root.mobile
@@ -109,7 +109,7 @@ Rectangle {
             ListView {
                 id: draftList
                 anchors.fill: parent
-                anchors.margins: 10
+                anchors.margins: Theme.space3
                 visible: root.store.drafts.length > 0
                 model: root.store.drafts
                 spacing: 6
@@ -136,8 +136,8 @@ Rectangle {
 
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 14
-                        anchors.rightMargin: 8
+                        anchors.leftMargin: Theme.space3
+                        anchors.rightMargin: Theme.space3
                         anchors.topMargin: 8
                         anchors.bottomMargin: 8
                         spacing: 10
