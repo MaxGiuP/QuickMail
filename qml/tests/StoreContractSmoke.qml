@@ -9,6 +9,9 @@ Item {
     width: 800
     height: 600
     property bool reconnectRecoveryPending: false
+    property int avatarCallbackCount: 0
+    property string avatarCallbackSource: ""
+    property int cancelledAvatarCallbackCount: 0
 
     function expect(condition, message) {
         if (condition) return
@@ -29,6 +32,8 @@ Item {
         property var delayedMail: []
         property var delayedThreads: []
         property var delayedActions: []
+        property var delayedAvatars: []
+        property bool delayAvatars: false
         property var snapshotResult: ({})
         property var methods: ({
             snapshot: "dashboard.snapshot",
@@ -46,6 +51,7 @@ Item {
             accountRemove: "accounts.remove",
             accountReauth: "accounts.reauth",
             attachmentDownload: "attachment.download",
+            avatarFetch: "avatar.fetch",
             messageSend: "mail.send",
             syncStart: "sync.start"
         })
@@ -128,6 +134,13 @@ Item {
                 callback({ accepted: true, completed: true, backgroundStarted: false }, null)
             else if (method === methods.attachmentDownload)
                 callback({ path: "/tmp/quickmail-test.txt", filename: "test.txt" }, null)
+            else if (method === methods.avatarFetch && delayAvatars) {
+                const pending = delayedAvatars.slice()
+                pending.push({ params: params, callback: callback })
+                delayedAvatars = pending
+            }
+            else if (method === methods.avatarFetch)
+                callback({ path: "/tmp/quickmail-avatar-test" }, null)
             else callback({}, null)
             return requests.length
         }
@@ -554,6 +567,56 @@ Item {
             request = fakeRpc.requests[fakeRpc.requests.length - 1]
             root.expect(request.params.disposition === "download", "save used the wrong attachment disposition")
 
+            fakeRpc.delayAvatars = true
+            fakeRpc.delayedAvatars = []
+            const avatarUrl = "https://www.gravatar.com/avatar/"
+                + "0ce273d3249291c620af81403b14b3c1?d=blank&s=128"
+            store.resolveAvatar(avatarUrl, function(source, error) {
+                if (!error) {
+                    ++root.avatarCallbackCount
+                    root.avatarCallbackSource = source
+                }
+            })
+            store.resolveAvatar(avatarUrl, function(source, error) {
+                if (!error) ++root.avatarCallbackCount
+            })
+            root.expect(fakeRpc.delayedAvatars.length === 1
+                    && store.avatarFetchInFlight === 1,
+                "duplicate visible senders issued more than one avatar fetch")
+            fakeRpc.delayedAvatars[0].callback({
+                path: "/tmp/quickmail-avatar-test"
+            }, null)
+
+            fakeRpc.delayedAvatars = []
+            const cancelledTokens = []
+            for (let avatarIndex = 0; avatarIndex < 5; ++avatarIndex) {
+                cancelledTokens.push(store.resolveAvatar(
+                    "https://icons.duckduckgo.com/ip3/company-"
+                        + avatarIndex + ".dev.ico", function(source, error) {
+                            ++root.cancelledAvatarCallbackCount
+                        }))
+            }
+            root.expect(fakeRpc.delayedAvatars.length === 4
+                    && store.avatarQueue.length === 1,
+                "avatar RPC concurrency was not bounded before cancellation")
+            root.expect(store.cancelAvatar(cancelledTokens[4])
+                    && store.avatarQueue.length === 0,
+                "an offscreen avatar remained in the pending network queue")
+            for (let tokenIndex = 0; tokenIndex < 4; ++tokenIndex)
+                root.expect(store.cancelAvatar(cancelledTokens[tokenIndex]),
+                    "an active avatar consumer could not detach safely")
+            for (let delayedIndex = 0;
+                    delayedIndex < fakeRpc.delayedAvatars.length; ++delayedIndex) {
+                fakeRpc.delayedAvatars[delayedIndex].callback({
+                    path: "/tmp/quickmail-cancelled-avatar-" + delayedIndex
+                }, null)
+            }
+            root.expect(root.cancelledAvatarCallbackCount === 0
+                    && store.avatarFetchInFlight === 0
+                    && Object.keys(store.avatarTokenUrls).length === 0,
+                "a cancelled or destroyed avatar received a late callback")
+            fakeRpc.delayAvatars = false
+
             fakeRpc.delayMail = true
             fakeRpc.delayedMail = []
             store.selectedMessage = {
@@ -623,6 +686,14 @@ Item {
                 return item.method === fakeRpc.methods.syncStart
                     && item.params.accountId === null
             }), "reconnect did not trigger an immediate all-account sync")
+            root.expect(root.avatarCallbackCount === 2
+                    && root.avatarCallbackSource
+                        === "file:///tmp/quickmail-avatar-test"
+                    && store.avatarFetchInFlight === 0,
+                "the single avatar result was not shared through the local-file cache")
+            root.expect(root.cancelledAvatarCallbackCount === 0
+                    && store.avatarQueue.length === 0,
+                "cancelled avatar work survived until the end of the test")
             Qt.quit()
         }
     }

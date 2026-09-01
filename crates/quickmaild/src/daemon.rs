@@ -3,6 +3,7 @@ use std::{
     fs::File,
     future::Future,
     io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::{
         fd::AsRawFd,
         unix::{
@@ -11,18 +12,19 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Weak},
+    time::{Duration as StdDuration, SystemTime},
 };
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use quickmail_core::{
     AccountAddParams, AccountIdParams, AttachmentData, AttachmentDownloadParams,
-    AttachmentDownloaded, CalendarEvent, CalendarListParams, DraftIdParams, DraftListParams,
-    DraftSaveParams, EventIdParams, JSONRPC_VERSION, MailAction, MailProvider, MailboxSyncQuery,
-    MessageIdParams, MessageQuery, OutgoingMessage, ProviderError, RpcError, RpcId,
-    RpcNotification, RpcRequest, RpcResponse, SubscribeParams, Task, TaskCompleteParams,
-    TaskIdParams, TaskListParams, method,
+    AttachmentDownloaded, AvatarFetchParams, AvatarFetched, CalendarEvent, CalendarListParams,
+    DraftIdParams, DraftListParams, DraftSaveParams, EventIdParams, JSONRPC_VERSION, MailAction,
+    MailProvider, MailboxSyncQuery, MessageIdParams, MessageQuery, OutgoingMessage, ProviderError,
+    RpcError, RpcId, RpcNotification, RpcRequest, RpcResponse, SubscribeParams, Task,
+    TaskCompleteParams, TaskIdParams, TaskListParams, method,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -30,7 +32,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, RwLock, broadcast, mpsc, watch},
+    sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, watch},
     task::JoinSet,
 };
 use tracing::{debug, warn};
@@ -49,6 +51,11 @@ const SYNC_PAGE_SIZE: u32 = 200;
 const SYNC_FLAG_RECONCILE_SIZE: u32 = 64;
 const MAX_SAFE_STYLESHEET_BYTES: usize = 256 * 1024;
 const AGENDA_RETRY_BACKOFF_MS: i64 = 30_000;
+const MAX_AVATAR_BYTES: usize = 512 * 1024;
+const AVATAR_CACHE_TTL: StdDuration = StdDuration::from_secs(7 * 24 * 60 * 60);
+const AVATAR_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(12);
+const AVATAR_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const MAX_CONCURRENT_AVATAR_FETCHES: usize = 4;
 
 const SAFE_CSS_PROPERTIES: &[&str] = &[
     "background-color",
@@ -288,6 +295,8 @@ pub struct Daemon {
     background_shutdown: watch::Sender<bool>,
     removed_accounts: Arc<Mutex<HashSet<String>>>,
     account_mutations: Arc<Mutex<()>>,
+    avatar_fetch_slots: Arc<Semaphore>,
+    avatar_key_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
 }
 
 /// Constructs a provider and moves plaintext setup secrets into the system
@@ -381,11 +390,24 @@ impl Daemon {
             background_shutdown,
             removed_accounts: Arc::new(Mutex::new(HashSet::new())),
             account_mutations: Arc::new(Mutex::new(())),
+            avatar_fetch_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_AVATAR_FETCHES)),
+            avatar_key_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn database(&self) -> &Database {
         &self.database
+    }
+
+    async fn avatar_key_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.avatar_key_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key.to_owned(), Arc::downgrade(&lock));
+        lock
     }
 
     pub async fn restore_providers(&self) -> Result<usize, DaemonError> {
@@ -619,7 +641,7 @@ impl Daemon {
                         continue;
                     }
 
-                    if matches!(request.method.as_str(), method::MAIL_GET | method::THREAD_GET) {
+                    if is_parallel_reader_method(&request.method) {
                         let daemon = self.clone();
                         let responses_sender = responses_sender.clone();
                         requests.spawn(async move {
@@ -1038,6 +1060,19 @@ impl Daemon {
                     });
                 }
                 encode(cache_attachment(&self.attachment_cache, attachment).await?)
+            }
+            method::AVATAR_FETCH => {
+                let params: AvatarFetchParams = decode(params)?;
+                let url = validate_avatar_url(&params.url)?.to_string();
+                let key_lock = self.avatar_key_lock(&url).await;
+                let _key_guard = key_lock.lock().await;
+                let _fetch_slot = self
+                    .avatar_fetch_slots
+                    .acquire()
+                    .await
+                    .map_err(|_| avatar_fetch_error("avatar service is shutting down"))?;
+                let cache = self.attachment_cache.join("avatars");
+                encode(fetch_avatar(&cache, &url).await?)
             }
             method::DRAFT_SAVE => {
                 let params: DraftSaveParams = decode(params)?;
@@ -2827,6 +2862,326 @@ fn validate_id_with_limit(id: &str, name: &str, max_len: usize) -> Result<(), Rp
         return Err(RpcError::invalid_params(format!("invalid {name}")));
     }
     Ok(())
+}
+
+fn is_parallel_reader_method(rpc_method: &str) -> bool {
+    matches!(
+        rpc_method,
+        method::MAIL_GET | method::THREAD_GET | method::AVATAR_FETCH
+    )
+}
+
+async fn fetch_avatar(cache_directory: &Path, value: &str) -> Result<AvatarFetched, RpcError> {
+    let url = validate_avatar_url(value)?;
+    let cache_path = avatar_cache_path(cache_directory, url.as_str());
+    let read_path = cache_path.clone();
+    if let Some(cached) = tokio::task::spawn_blocking(move || read_cached_avatar(&read_path))
+        .await
+        .map_err(|error| RpcError::internal(error.to_string()))?
+        .map_err(|error| RpcError::internal(error.to_string()))?
+    {
+        return Ok(cached);
+    }
+
+    let host = url
+        .host_str()
+        .expect("validated avatar URL always has a host")
+        .to_owned();
+    let mut resolved = tokio::net::lookup_host((host.as_str(), 443))
+        .await
+        .map_err(|_| avatar_fetch_error("avatar host could not be resolved"))?
+        .filter(|address| is_public_ip(address.ip()))
+        .collect::<Vec<_>>();
+    resolved.sort_unstable();
+    resolved.dedup();
+    if resolved.is_empty() {
+        return Err(RpcError::invalid_params(
+            "avatar host did not resolve to a public address",
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(AVATAR_CONNECT_TIMEOUT)
+        .timeout(AVATAR_FETCH_TIMEOUT)
+        // Pin the addresses resolved and checked above. This prevents a
+        // second DNS lookup from turning a public URL into an SSRF request.
+        .resolve_to_addrs(&host, &resolved)
+        .user_agent("QuickMail/0.1 avatar-cache")
+        .build()
+        .map_err(|_| avatar_fetch_error("avatar transport is unavailable"))?;
+    let mut response = client
+        .get(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "image/webp,image/png,image/jpeg,image/gif,image/x-icon;q=0.9,*/*;q=0.1",
+        )
+        .send()
+        .await
+        .map_err(|_| avatar_fetch_error("avatar image is temporarily unavailable"))?;
+    if !response.status().is_success() {
+        return Err(RpcError {
+            code: -32023,
+            message: "avatar image was not found".into(),
+            data: None,
+        });
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AVATAR_BYTES as u64)
+    {
+        return Err(avatar_too_large_error());
+    }
+
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_AVATAR_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| avatar_fetch_error("avatar image transfer failed"))?
+    {
+        if chunk.len() > MAX_AVATAR_BYTES.saturating_sub(bytes.len()) {
+            return Err(avatar_too_large_error());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let Some(content_type) = detect_avatar_content_type(&bytes) else {
+        return Err(RpcError {
+            code: -32022,
+            message: "avatar response was not a supported image".into(),
+            data: None,
+        });
+    };
+    let size = bytes.len() as u64;
+    let write_path = cache_path.clone();
+    let write_directory = cache_directory.to_owned();
+    tokio::task::spawn_blocking(move || write_cached_avatar(&write_directory, &write_path, &bytes))
+        .await
+        .map_err(|error| RpcError::internal(error.to_string()))?
+        .map_err(|error| RpcError::internal(error.to_string()))?;
+
+    Ok(AvatarFetched {
+        path: cache_path.to_string_lossy().into_owned(),
+        content_type: content_type.into(),
+        size,
+        cached: false,
+    })
+}
+
+fn validate_avatar_url(value: &str) -> Result<url::Url, RpcError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 2_048 || value.chars().any(char::is_control) {
+        return Err(RpcError::invalid_params("invalid avatar URL"));
+    }
+    let url = url::Url::parse(value).map_err(|_| RpcError::invalid_params("invalid avatar URL"))?;
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| RpcError::invalid_params("invalid avatar URL host"))?;
+    let valid = url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.fragment().is_none()
+        && host.parse::<IpAddr>().is_err()
+        && is_allowed_avatar_url(&url, &host);
+    if !valid {
+        return Err(RpcError::invalid_params(
+            "avatar URL is not from a supported HTTPS image host",
+        ));
+    }
+    Ok(url)
+}
+
+fn is_allowed_avatar_url(url: &url::Url, host: &str) -> bool {
+    if host == "www.gravatar.com" {
+        let Some(hash) = url.path().strip_prefix("/avatar/") else {
+            return false;
+        };
+        if hash.len() != 32 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        let query = url.query_pairs().collect::<Vec<_>>();
+        return query.len() == 2
+            && query
+                .iter()
+                .any(|(key, value)| key == "d" && value == "blank")
+            && query
+                .iter()
+                .any(|(key, value)| key == "s" && value == "128");
+    }
+    if host != "icons.duckduckgo.com" || url.query().is_some() {
+        return false;
+    }
+    let Some(domain) = url
+        .path()
+        .strip_prefix("/ip3/")
+        .and_then(|path| path.strip_suffix(".ico"))
+    else {
+        return false;
+    };
+    is_public_domain_name(domain)
+}
+
+fn is_public_domain_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 253
+        || value.contains("..")
+        || !value.contains('.')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return false;
+    }
+    let labels = value.split('.').collect::<Vec<_>>();
+    if labels.iter().any(|label| {
+        label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-')
+    }) {
+        return false;
+    }
+    let suffix = labels.last().copied().unwrap_or_default();
+    !matches!(
+        suffix.to_ascii_lowercase().as_str(),
+        "localhost" | "local" | "lan" | "home" | "internal" | "invalid" | "test" | "example"
+    ) && !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "example.com" | "example.net" | "example.org"
+    )
+}
+
+fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [first, second, third, _fourth] = address.octets();
+    !(first == 0
+        || first == 10
+        || first == 127
+        || (first == 100 && (64..=127).contains(&second))
+        || (first == 169 && second == 254)
+        || (first == 172 && (16..=31).contains(&second))
+        || (first == 192 && second == 0 && third == 0)
+        || (first == 192 && second == 0 && third == 2)
+        || (first == 192 && second == 88 && third == 99)
+        || (first == 192 && second == 168)
+        || (first == 198 && (second == 18 || second == 19))
+        || (first == 198 && second == 51 && third == 100)
+        || (first == 203 && second == 0 && third == 113)
+        || first >= 224)
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return is_public_ipv4(mapped);
+    }
+    let segments = address.segments();
+    // Public DNS avatar hosts only need globally routable unicast addresses.
+    // Reject all local, multicast, documentation, and other special ranges.
+    (segments[0] & 0xe000) == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+fn avatar_cache_path(cache_directory: &Path, url: &str) -> PathBuf {
+    cache_directory.join(Uuid::new_v5(&Uuid::NAMESPACE_URL, url.as_bytes()).to_string())
+}
+
+fn read_cached_avatar(path: &Path) -> io::Result<Option<AvatarFetched>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != current_uid()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > MAX_AVATAR_BYTES as u64
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "avatar cache file is not private, regular, and bounded",
+        ));
+    }
+    let fresh = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age <= AVATAR_CACHE_TTL);
+    if !fresh {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let Some(content_type) = detect_avatar_content_type(&bytes) else {
+        return Ok(None);
+    };
+    Ok(Some(AvatarFetched {
+        path: path.to_string_lossy().into_owned(),
+        content_type: content_type.into(),
+        size: bytes.len() as u64,
+        cached: true,
+    }))
+}
+
+fn write_cached_avatar(directory: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    ensure_private_directory(directory)?;
+    let temporary = directory.join(format!(".{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn detect_avatar_content_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"\x00\x00\x01\x00") {
+        Some("image/x-icon")
+    } else {
+        None
+    }
+}
+
+fn avatar_fetch_error(message: &str) -> RpcError {
+    RpcError {
+        code: -32020,
+        message: message.into(),
+        data: None,
+    }
+}
+
+fn avatar_too_large_error() -> RpcError {
+    RpcError {
+        code: -32021,
+        message: "avatar image exceeds the 512 KiB limit".into(),
+        data: None,
+    }
 }
 
 async fn cache_attachment(
@@ -6036,5 +6391,96 @@ mod tests {
             "attachment exceeds the configured size limit"
         );
         assert!(!cache.exists());
+    }
+
+    #[test]
+    fn avatar_urls_are_exactly_allowlisted_and_ssrf_safe() {
+        let gravatar =
+            "https://www.gravatar.com/avatar/0ce273d3249291c620af81403b14b3c1?d=blank&s=128";
+        let brand = "https://icons.duckduckgo.com/ip3/linkedin.com.ico";
+        assert_eq!(validate_avatar_url(gravatar).unwrap().as_str(), gravatar);
+        assert_eq!(validate_avatar_url(brand).unwrap().as_str(), brand);
+
+        for rejected in [
+            "http://www.gravatar.com/avatar/0ce273d3249291c620af81403b14b3c1?d=blank&s=128",
+            "https://user@www.gravatar.com/avatar/0ce273d3249291c620af81403b14b3c1?d=blank&s=128",
+            "https://www.gravatar.com:444/avatar/0ce273d3249291c620af81403b14b3c1?d=blank&s=128",
+            "https://www.gravatar.com/avatar/not-a-hash?d=blank&s=128",
+            "https://www.gravatar.com/avatar/0ce273d3249291c620af81403b14b3c1?d=blank&s=128&url=https://127.0.0.1",
+            "https://www.gravatar.com.evil.test/avatar/0ce273d3249291c620af81403b14b3c1?d=blank&s=128",
+            "https://icons.duckduckgo.com/ip3/localhost.ico",
+            "https://icons.duckduckgo.com/ip3/example.com.ico",
+            "https://icons.duckduckgo.com/ip3/linkedin.com.ico?redirect=https://127.0.0.1",
+            "https://127.0.0.1/avatar.png",
+            "https://avatars.githubusercontent.com/u/1?v=4",
+        ] {
+            assert!(
+                validate_avatar_url(rejected).is_err(),
+                "accepted unsafe avatar URL: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn avatar_image_sniffing_rejects_active_or_unknown_payloads() {
+        assert_eq!(
+            detect_avatar_content_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_avatar_content_type(b"\xff\xd8\xffrest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(detect_avatar_content_type(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(
+            detect_avatar_content_type(b"RIFF\x01\x00\x00\x00WEBPrest"),
+            Some("image/webp")
+        );
+        assert_eq!(
+            detect_avatar_content_type(b"\x00\x00\x01\x00rest"),
+            Some("image/x-icon")
+        );
+        assert_eq!(detect_avatar_content_type(b"<svg onload='bad()'/>"), None);
+        assert_eq!(
+            detect_avatar_content_type(b"<html>not an image</html>"),
+            None
+        );
+    }
+
+    #[test]
+    fn avatar_cache_is_deterministic_private_and_readable() {
+        let directory = tempdir().unwrap();
+        let cache = directory.path().join("avatars");
+        let url = "https://icons.duckduckgo.com/ip3/linkedin.com.ico";
+        let path = avatar_cache_path(&cache, url);
+        assert_eq!(path, avatar_cache_path(&cache, url));
+        let bytes = b"\x00\x00\x01\x00cached-icon";
+        write_cached_avatar(&cache, &path, bytes).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let cached = read_cached_avatar(&path).unwrap().unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.path, path.to_string_lossy());
+        assert_eq!(cached.content_type, "image/x-icon");
+        assert_eq!(cached.size, bytes.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn duplicate_avatar_keys_share_a_lock_and_use_the_reader_lane() {
+        let daemon = Daemon::new(Database::open_in_memory().unwrap());
+        let first = daemon.avatar_key_lock("same-avatar").await;
+        let duplicate = daemon.avatar_key_lock("same-avatar").await;
+        let other = daemon.avatar_key_lock("other-avatar").await;
+        assert!(Arc::ptr_eq(&first, &duplicate));
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(is_parallel_reader_method(method::AVATAR_FETCH));
+        assert!(!is_parallel_reader_method(method::MAIL_ACTION));
     }
 }

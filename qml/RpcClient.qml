@@ -25,6 +25,7 @@ QtObject {
         draftDelete: "draft.delete",
         messageSend: "mail.send",
         attachmentDownload: "attachment.download",
+        avatarFetch: "avatar.fetch",
         taskList: "task.list",
         taskCreate: "task.create",
         taskUpdate: "task.update",

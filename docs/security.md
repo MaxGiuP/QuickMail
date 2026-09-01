@@ -31,10 +31,14 @@ untrusted.
 - Sender avatars are best-effort and do not request additional OAuth scopes.
   With remote content enabled, visible rows may send an MD5 hash of a
   normalized sender address to Gravatar, or the public domain of a recognized
-  automated sender to DuckDuckGo's favicon service. Human senders fall back to
-  initials when no provider URL or Gravatar exists. A persisted opt-out is
-  applied fail-closed before settings finish loading and suppresses both avatar
-  lookups and message-body images.
+  automated sender to DuckDuckGo's favicon service. Those are the only two
+  accepted avatar endpoints. The daemon uses Rustls, disables redirects and
+  proxies, pins a checked public DNS result, bounds the response to 512 KiB,
+  rejects active/unknown formats, and atomically caches mode-`0600` files;
+  Qt receives only a local `file://` URL. Human senders fall back to initials
+  when no Gravatar exists. A persisted opt-out is applied fail-closed before
+  settings finish loading and suppresses both avatar lookups and message-body
+  images.
 - MIME parsing and attachment names are bounded and sanitized. Attachment
   cache paths are generated inside an application-owned private directory.
 - Provider and SMTP errors are deliberately redacted; tokens, passwords,

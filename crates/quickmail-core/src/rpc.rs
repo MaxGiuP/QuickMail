@@ -24,6 +24,7 @@ pub mod method {
     pub const DRAFT_GET: &str = "draft.get";
     pub const DRAFT_DELETE: &str = "draft.delete";
     pub const ATTACHMENT_DOWNLOAD: &str = "attachment.download";
+    pub const AVATAR_FETCH: &str = "avatar.fetch";
     pub const TASK_LIST: &str = "task.list";
     pub const TASK_CREATE: &str = "task.create";
     pub const TASK_UPDATE: &str = "task.update";
@@ -306,6 +307,21 @@ pub struct AttachmentDownloaded {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AvatarFetchParams {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarFetched {
+    pub path: String,
+    pub content_type: String,
+    pub size: u64,
+    pub cached: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftSaveParams {
@@ -402,6 +418,25 @@ mod tests {
                 "provider": "gmail",
                 "address": "person@gmail.com",
                 "oauth": {"clientId": "must-not-be-client-facing"}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn avatar_fetch_contract_is_narrow_and_uses_camel_case() {
+        let params: AvatarFetchParams = serde_json::from_value(json!({
+            "url": "https://icons.duckduckgo.com/ip3/example.dev.ico"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            json!({"url": "https://icons.duckduckgo.com/ip3/example.dev.ico"})
+        );
+        assert!(
+            serde_json::from_value::<AvatarFetchParams>(json!({
+                "url": "https://icons.duckduckgo.com/ip3/example.dev.ico",
+                "redirect": "https://127.0.0.1/private"
             }))
             .is_err()
         );

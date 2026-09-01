@@ -21,7 +21,7 @@ ApplicationWindow {
                 id: "message-" + index,
                 author: {
                     name: "Sender " + index,
-                    address: "sender-" + index + "@example.com"
+                    address: "alerts-" + index + "@linkedin.com"
                 },
                 subject: "A long conversation",
                 snippet: "Message preview " + index,
@@ -68,6 +68,8 @@ ApplicationWindow {
         property bool threadTruncated: false
         property bool readerLoading: false
         property string errorText: ""
+        property int avatarEpoch: 1
+        property int avatarRequestCount: 0
 
         function messageId(message) { return String(message && message.id || "") }
         function messageBodyText(message) { return String(message && message.bodyText || "") }
@@ -77,6 +79,7 @@ ApplicationWindow {
         function trash(message) {}
         function downloadAttachment(attachment, open, callback) {}
         function saveAttachmentTo(source, destination, callback) {}
+        function resolveAvatar(url, callback) { ++avatarRequestCount }
     }
 
     MessageReaderPane {
@@ -118,6 +121,9 @@ ApplicationWindow {
             window.expect(avatars.length === active.length
                     && avatars.length <= window.viewportAvatarLimit,
                 "the settled reader instantiated offscreen avatars")
+            window.expect(testStore.avatarRequestCount > 0
+                    && testStore.avatarRequestCount <= avatars.length + 1,
+                "offscreen senders issued avatar RPC requests")
             Qt.quit()
         }
     }

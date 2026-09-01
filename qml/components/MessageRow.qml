@@ -6,6 +6,7 @@ import ".."
 Rectangle {
     id: root
     required property var message
+    property var avatarResolver: null
     property bool selected: false
     property bool compact: false
     signal activated()
@@ -23,10 +24,6 @@ Rectangle {
         || message.from || message.from_address || "Unknown sender") || "Unknown sender"
     readonly property string senderAddress: singleLine((message.author && message.author.address)
         || message.from_address || message.from || "")
-    readonly property string senderAvatarUrl: String(message.avatarUrl || message.avatar_url
-        || message.photoUrl || message.photo_url
-        || (message.author && (message.author.avatarUrl || message.author.avatar_url
-            || message.author.photoUrl || message.author.photo_url)) || "")
     readonly property string subject: singleLine(message.subject) || "(No subject)"
     readonly property string snippet: singleLine(message.snippet || message.preview || "")
     readonly property string timestamp: singleLine(formatTimestamp(message.received_display
@@ -68,7 +65,7 @@ Rectangle {
             Layout.alignment: Qt.AlignTop
             displayName: root.sender
             address: root.senderAddress
-            avatarUrl: root.senderAvatarUrl
+            avatarResolver: root.avatarResolver
             allowRemoteContent: AppSettings.effectiveAllowRemoteContent
             backgroundColor: root.unread ? Theme.accentSoft : Theme.surfaceRaised
             foregroundColor: root.unread ? Theme.accent : Theme.textSecondary

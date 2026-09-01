@@ -24,6 +24,51 @@ ApplicationWindow {
             descendantsWithName(children[index], name, result)
     }
 
+    property int phase: 0
+    property int requestsBeforeOptOut: 0
+
+    QtObject {
+        id: fakeResolver
+        property int avatarEpoch: 1
+        property int requestCount: 0
+        property int nextToken: 1
+        property int currentToken: 0
+        property int cancelCount: 0
+        property string lastUrl: ""
+        property var pendingCallback: null
+        property var cancelledCallback: null
+
+        function resolveAvatar(url, callback) {
+            ++requestCount
+            lastUrl = String(url || "")
+            pendingCallback = callback
+            currentToken = nextToken++
+            return currentToken
+        }
+
+        function cancelAvatar(token) {
+            if (Number(token) !== currentToken || currentToken === 0) return false
+            cancelledCallback = pendingCallback
+            pendingCallback = null
+            currentToken = 0
+            ++cancelCount
+            return true
+        }
+
+        function completeWithLocalFile() {
+            const callback = pendingCallback
+            pendingCallback = null
+            currentToken = 0
+            callback(Qt.resolvedUrl("avatar-fixture.svg"), null)
+        }
+
+        function completeCancelledRequest() {
+            const callback = cancelledCallback
+            cancelledCallback = null
+            callback(Qt.resolvedUrl("avatar-fixture.svg"), null)
+        }
+    }
+
     SenderAvatar {
         id: personalAvatar
         x: 20
@@ -47,17 +92,6 @@ ApplicationWindow {
     }
 
     SenderAvatar {
-        id: providerAvatar
-        x: 148
-        y: 20
-        width: 48
-        height: 48
-        displayName: "Provider Contact"
-        avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4"
-        allowRemoteContent: false
-    }
-
-    SenderAvatar {
         id: humanCompanyAvatar
         x: 276
         y: 20
@@ -76,15 +110,69 @@ ApplicationWindow {
         height: 48
         displayName: "Unsafe Contact"
         address: "person@localhost"
-        avatarUrl: "javascript:alert(1)"
         allowRemoteContent: true
+    }
+
+    SenderAvatar {
+        id: brokeredAvatar
+        x: 340
+        y: 20
+        width: 48
+        height: 48
+        displayName: "Brokered Alert"
+        address: "notifications@linkedin.com"
+        allowRemoteContent: true
+        avatarResolver: fakeResolver
     }
 
     Timer {
         interval: 50
         running: true
-        repeat: false
+        repeat: true
         onTriggered: {
+            if (window.phase === 1) {
+                window.expect(brokeredAvatar.requestedSource.toLowerCase()
+                        .startsWith("file:///"),
+                    "the daemon-cached avatar was not loaded from a local file")
+                window.expect(brokeredAvatar.showingImage,
+                    "the local avatar fixture did not render")
+                window.requestsBeforeOptOut = fakeResolver.requestCount
+                ++fakeResolver.avatarEpoch
+                window.phase = 2
+                return
+            }
+            if (window.phase === 2) {
+                window.expect(fakeResolver.requestCount
+                        === window.requestsBeforeOptOut + 1
+                        && brokeredAvatar.pendingToken > 0,
+                    "a reconnect did not create one cancelable avatar request")
+                window.requestsBeforeOptOut = fakeResolver.requestCount
+                brokeredAvatar.allowRemoteContent = false
+                window.phase = 3
+                return
+            }
+            if (window.phase === 3) {
+                window.expect(brokeredAvatar.requestedSource === ""
+                        && !brokeredAvatar.showingImage,
+                    "remote-content opt-out did not clear the cached avatar")
+                window.expect(fakeResolver.requestCount === window.requestsBeforeOptOut,
+                    "remote-content opt-out issued another avatar request")
+                window.expect(fakeResolver.cancelCount === 1
+                        && brokeredAvatar.pendingToken === 0,
+                    "remote-content opt-out did not cancel its queued consumer")
+                fakeResolver.completeCancelledRequest()
+                window.phase = 4
+                return
+            }
+            if (window.phase === 4) {
+                window.expect(brokeredAvatar.requestedSource === ""
+                        && !brokeredAvatar.showingImage,
+                    "a late callback restored an avatar after opt-out")
+                stop()
+                Qt.quit()
+                return
+            }
+
             window.expect(personalAvatar.normalizedAddress === "alice@gmail.com",
                 "email addresses were not normalized before hashing")
             window.expect(personalAvatar.candidateCount === 1
@@ -98,34 +186,36 @@ ApplicationWindow {
                     && automatedAvatar.candidateAt(1).indexOf(
                         "https://www.gravatar.com/avatar/") === 0,
                 "automated brand senders do not prefer their own domain icon")
-            window.expect(providerAvatar.normalizedAvatarUrl
-                    === "https://avatars.githubusercontent.com/u/1?v=4"
-                    && providerAvatar.candidateAt(0) === providerAvatar.normalizedAvatarUrl,
-                "a valid provider-supplied HTTPS photo was not preferred")
             window.expect(humanCompanyAvatar.candidateCount === 1
                     && humanCompanyAvatar.candidateAt(0).indexOf(
                         "https://www.gravatar.com/avatar/") === 0,
                 "a human sender was misleadingly represented by an employer favicon")
             window.expect(unsafeAvatar.normalizedAddress === ""
-                    && unsafeAvatar.normalizedAvatarUrl === ""
                     && unsafeAvatar.candidateCount === 0
                     && unsafeAvatar.requestedSource === "",
                 "an unsafe address or image scheme reached the image loader")
             window.expect(personalAvatar.requestedSource === ""
-                    && automatedAvatar.requestedSource === ""
-                    && providerAvatar.requestedSource === "",
+                    && automatedAvatar.requestedSource === "",
                 "remote-content opt-out did not suppress avatar requests")
+            window.expect(fakeResolver.requestCount === 1
+                    && fakeResolver.lastUrl
+                        === "https://icons.duckduckgo.com/ip3/linkedin.com.ico",
+                "the visible avatar did not request its preferred candidate once")
+            window.expect(brokeredAvatar.requestedSource === ""
+                    && !brokeredAvatar.requestedSource.toLowerCase().startsWith("http"),
+                "a remote URL reached Qt's image loader before daemon caching")
 
             const images = []
             window.descendantsWithName(personalAvatar, "senderAvatarImage", images)
-            window.expect(images.length === 1 && images[0].asynchronous
+            window.expect(images.length === 1 && !images[0].asynchronous
                     && images[0].cache,
-                "avatar loading is not asynchronous and cache-enabled")
+                "avatar loading is not local-only and cache-enabled")
             const initials = []
             window.descendantsWithName(personalAvatar, "senderAvatarInitials", initials)
             window.expect(initials.length === 1 && initials[0].text === "AA",
                 "the clean initials fallback was not retained")
-            Qt.quit()
+            fakeResolver.completeWithLocalFile()
+            window.phase = 1
         }
     }
 }

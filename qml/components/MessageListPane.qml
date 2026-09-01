@@ -159,6 +159,7 @@ Rectangle {
                     required property int index
                     width: messageList.width - (messageList.ScrollBar.vertical.visible ? 10 : 0)
                     message: modelData
+                    avatarResolver: root.store
                     compact: root.width < 330
                     selected: store.selectedMessage
                         && store.threadKey(store.selectedMessage) === store.threadKey(modelData)

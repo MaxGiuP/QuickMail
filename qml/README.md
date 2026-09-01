@@ -35,9 +35,11 @@ interactive elements, positioning, and every CSS resource function. The
 sanitized body background fills the message viewport, and fixed-width tables
 that remain wider than a narrow reader are exposed through a clipped horizontal
 viewport instead of being cut off. Image URLs use a positive HTTP/HTTPS
-allowlist. Remote images and best-effort sender avatars are enabled by default
-and can be disabled persistently from the compact reader settings menu; the
-saved opt-out is applied before any remote renderer is enabled. Only HTTP,
+allowlist. Remote images and best-effort sender avatars are enabled by default;
+avatar HTTPS is brokered through the daemon's bounded private cache so QML only
+loads local files. Both can be disabled persistently from the compact reader
+settings menu, and the saved opt-out is applied before any remote renderer is
+enabled. Only HTTP,
 HTTPS, and mailto links can leave the mail pane. Messages without HTML fall
 back to their local plain text. Saved drafts
 use the daemon's account-scoped list/get/delete lifecycle and carry their

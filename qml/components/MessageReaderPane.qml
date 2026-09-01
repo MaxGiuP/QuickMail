@@ -28,7 +28,6 @@ Rectangle {
         || message.from || message.from_address || "Unknown sender") || "Unknown sender"
     readonly property string senderAddress: singleLine((message.author && message.author.address)
         || message.from_address || message.from || "")
-    readonly property string senderAvatarUrl: avatarUrl(message)
     readonly property string recipient: addressList(message.to_display || message.to || "")
     readonly property string bodyText: store.messageBodyText(message)
     readonly property string bodyHtml: String(message.bodyHtml || message.body_html || "")
@@ -76,13 +75,6 @@ Rectangle {
     function senderAddressFor(item) {
         return singleLine(item && ((item.author && item.author.address)
             || item.from_address || item.from) || "")
-    }
-
-    function avatarUrl(item) {
-        return String(item && (item.avatarUrl || item.avatar_url
-            || item.photoUrl || item.photo_url
-            || (item.author && (item.author.avatarUrl || item.author.avatar_url
-                || item.author.photoUrl || item.author.photo_url))) || "")
     }
 
     function threadSelected(item) {
@@ -357,7 +349,7 @@ Rectangle {
                                             objectName: "threadCardAvatar"
                                             displayName: root.threadSender(threadCard.modelData)
                                             address: root.senderAddressFor(threadCard.modelData)
-                                            avatarUrl: root.avatarUrl(threadCard.modelData)
+                                            avatarResolver: root.store
                                             allowRemoteContent: AppSettings.effectiveAllowRemoteContent
                                         }
                                     }
@@ -440,7 +432,7 @@ Rectangle {
                         Layout.preferredHeight: 42
                         displayName: root.sender
                         address: root.senderAddress
-                        avatarUrl: root.senderAvatarUrl
+                        avatarResolver: root.store
                         allowRemoteContent: AppSettings.effectiveAllowRemoteContent
                     }
                     ColumnLayout {

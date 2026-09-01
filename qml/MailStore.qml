@@ -49,6 +49,15 @@ QtObject {
     property int draftsRequestGeneration: 0
     property int draftOpenGeneration: 0
     property int agendaRequestGeneration: 0
+    property int avatarEpoch: 0
+    property int avatarFetchInFlight: 0
+    readonly property int avatarFetchLimit: 4
+    property var avatarPaths: ({})
+    property var avatarFailures: ({})
+    property var avatarWaiters: ({})
+    property var avatarQueue: []
+    property var avatarTokenUrls: ({})
+    property int nextAvatarToken: 1
 
     readonly property var activeAccount: findById(accounts, activeAccountId)
     readonly property var activeFolder: findById(folders, activeFolderId)
@@ -1172,6 +1181,149 @@ QtObject {
         })
     }
 
+    function resolveAvatar(url, callback) {
+        const candidate = String(url || "").trim()
+        if (candidate.length === 0 || candidate.length > 2048
+                || !candidate.toLowerCase().startsWith("https://")) {
+            invokeAvatarCallback(callback, "", { message: "Invalid avatar URL" })
+            return 0
+        }
+        const key = "$" + candidate
+        if (avatarPaths[key] !== undefined) {
+            invokeAvatarCallback(callback, String(avatarPaths[key]), null)
+            return 0
+        }
+        const failedAt = Number(avatarFailures[key] || 0)
+        if (failedAt > 0 && Date.now() - failedAt < 5 * 60 * 1000) {
+            invokeAvatarCallback(callback, "", { message: "Avatar is unavailable" })
+            return 0
+        }
+
+        const token = nextAvatarToken++
+        const waiter = { token: token, callback: callback }
+        const waiters = Object.assign({}, avatarWaiters)
+        if (Array.isArray(waiters[key])) {
+            const callbacks = waiters[key].slice()
+            callbacks.push(waiter)
+            waiters[key] = callbacks
+            avatarWaiters = waiters
+            const tokenUrls = Object.assign({}, avatarTokenUrls)
+            tokenUrls["$" + token] = candidate
+            avatarTokenUrls = tokenUrls
+            return token
+        }
+        waiters[key] = [waiter]
+        avatarWaiters = waiters
+        const tokenUrls = Object.assign({}, avatarTokenUrls)
+        tokenUrls["$" + token] = candidate
+        avatarTokenUrls = tokenUrls
+        const queued = avatarQueue.slice()
+        queued.push(candidate)
+        avatarQueue = queued
+        processAvatarQueue()
+        return avatarTokenUrls["$" + token] !== undefined ? token : 0
+    }
+
+    function invokeAvatarCallback(callback, source, error) {
+        if (typeof callback !== "function") return
+        callback(source, error)
+    }
+
+    function cancelAvatar(token) {
+        const tokenKey = "$" + Number(token || 0)
+        const candidate = String(avatarTokenUrls[tokenKey] || "")
+        if (candidate === "") return false
+        const tokenUrls = Object.assign({}, avatarTokenUrls)
+        delete tokenUrls[tokenKey]
+        avatarTokenUrls = tokenUrls
+
+        const key = "$" + candidate
+        const callbacks = Array.isArray(avatarWaiters[key])
+            ? avatarWaiters[key].filter(function(waiter) {
+                return Number(waiter && waiter.token || 0) !== Number(token)
+            }) : []
+        const waiters = Object.assign({}, avatarWaiters)
+        if (callbacks.length > 0) waiters[key] = callbacks
+        else delete waiters[key]
+        avatarWaiters = waiters
+        if (callbacks.length === 0) {
+            avatarQueue = avatarQueue.filter(function(url) {
+                return String(url) !== candidate
+            })
+        }
+        return true
+    }
+
+    function processAvatarQueue() {
+        while (avatarFetchInFlight < avatarFetchLimit && avatarQueue.length > 0) {
+            const queued = avatarQueue.slice()
+            const candidate = queued.shift()
+            avatarQueue = queued
+            ++avatarFetchInFlight
+            startAvatarRequest(candidate)
+        }
+    }
+
+    function startAvatarRequest(candidate) {
+        if (!rpc.connected) {
+            finishAvatarRequest(candidate, "",
+                { message: "QuickMail is offline" }, false)
+            return
+        }
+        rpc.requestConnected(rpc.methods.avatarFetch, { url: candidate },
+            function(result, error) {
+                const source = error ? "" : localAvatarSource(result)
+                const invalidResult = !error && source === ""
+                    ? { message: "The avatar cache returned an invalid path" } : error
+                finishAvatarRequest(candidate, source, invalidResult,
+                    shouldCacheAvatarFailure(invalidResult))
+            })
+    }
+
+    function shouldCacheAvatarFailure(error) {
+        const code = Number(error && error.code)
+        return code === -32602 || code === -32021
+            || code === -32022 || code === -32023
+    }
+
+    function localAvatarSource(result) {
+        const path = String(result && result.path || "")
+        if (path.length === 0 || path.length > 4096 || path[0] !== "/"
+                || /[\u0000-\u001f\u007f-\u009f]/.test(path)) return ""
+        return encodeURI("file://" + path)
+    }
+
+    function finishAvatarRequest(url, source, error, cacheFailure) {
+        const key = "$" + String(url || "")
+        if (source !== "") {
+            const paths = Object.assign({}, avatarPaths)
+            paths[key] = source
+            avatarPaths = paths
+            const failures = Object.assign({}, avatarFailures)
+            delete failures[key]
+            avatarFailures = failures
+        } else if (cacheFailure) {
+            const failures = Object.assign({}, avatarFailures)
+            failures[key] = Date.now()
+            avatarFailures = failures
+        }
+
+        const callbacks = Array.isArray(avatarWaiters[key])
+            ? avatarWaiters[key].slice() : []
+        const waiters = Object.assign({}, avatarWaiters)
+        delete waiters[key]
+        avatarWaiters = waiters
+        avatarFetchInFlight = Math.max(0, avatarFetchInFlight - 1)
+        const tokenUrls = Object.assign({}, avatarTokenUrls)
+        for (let index = 0; index < callbacks.length; ++index) {
+            const waiter = callbacks[index] || ({})
+            delete tokenUrls["$" + Number(waiter.token || 0)]
+            invokeAvatarCallback(waiter.callback, source, error)
+        }
+        avatarTokenUrls = tokenUrls
+        Qt.callLater(function() { root.processAvatarQueue() })
+    }
+
     function saveAttachmentTo(source, destination, callback) {
         if (typeof attachmentSaveHandler !== "function") {
             if (typeof callback === "function")
@@ -1198,6 +1350,7 @@ QtObject {
         target: rpc
         function onConnectionReady() {
             root.offline = false
+            ++root.avatarEpoch
             root.loadInitial()
         }
         function onConnectionLost() {
