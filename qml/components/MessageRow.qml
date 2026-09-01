@@ -17,14 +17,26 @@ Rectangle {
     readonly property bool unread: message.unread === true || message.is_read === false || message.read === false
     readonly property bool starred: message.starred === true || message.is_starred === true
     readonly property int conversationCount: Number(message.conversationCount || 1)
-    readonly property string sender: Array.isArray(message.conversationSenders)
-        ? message.conversationSenders.join(", ") : String(message.from_name || message.sender_name
+    readonly property string sender: singleLine(Array.isArray(message.conversationSenders)
+        ? message.conversationSenders.join(", ") : message.from_name || message.sender_name
         || (message.author && (message.author.name || message.author.address))
-        || message.from || message.from_address || "Unknown sender")
-    readonly property string subject: String(message.subject || "(No subject)")
-    readonly property string snippet: String(message.snippet || message.preview || "")
-    readonly property string timestamp: formatTimestamp(message.received_display || message.date_display
-        || message.time || message.timestamp || message.received_at || "")
+        || message.from || message.from_address || "Unknown sender") || "Unknown sender"
+    readonly property string senderAddress: singleLine((message.author && message.author.address)
+        || message.from_address || message.from || "")
+    readonly property string senderAvatarUrl: String(message.avatarUrl || message.avatar_url
+        || message.photoUrl || message.photo_url
+        || (message.author && (message.author.avatarUrl || message.author.avatar_url
+            || message.author.photoUrl || message.author.photo_url)) || "")
+    readonly property string subject: singleLine(message.subject) || "(No subject)"
+    readonly property string snippet: singleLine(message.snippet || message.preview || "")
+    readonly property string timestamp: singleLine(formatTimestamp(message.received_display
+        || message.date_display || message.time || message.timestamp || message.received_at || ""))
+
+    function singleLine(value) {
+        return String(value === undefined || value === null ? "" : value)
+            .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+            .replace(/\s+/g, " ").trim()
+    }
 
     function formatTimestamp(value) {
         if (!value) return ""
@@ -36,6 +48,7 @@ Rectangle {
     }
 
     height: compact ? 74 : 86
+    clip: true
     radius: Theme.radiusSmall
     color: selected ? Theme.surfaceSelected
         : rowMouse.containsMouse ? Theme.surfaceHover : "transparent"
@@ -48,29 +61,27 @@ Rectangle {
         anchors.bottomMargin: 8
         spacing: 10
 
-        Rectangle {
+        SenderAvatar {
+            objectName: "messageRowAvatar"
             Layout.preferredWidth: 36
             Layout.preferredHeight: 36
             Layout.alignment: Qt.AlignTop
-            radius: 18
-            color: root.unread ? Theme.accentSoft : Theme.surfaceRaised
-            Text {
-                anchors.centerIn: parent
-                text: Theme.initials(root.sender)
-                textFormat: Text.PlainText
-                color: root.unread ? Theme.accent : Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: 11
-                font.weight: Font.DemiBold
-            }
+            displayName: root.sender
+            address: root.senderAddress
+            avatarUrl: root.senderAvatarUrl
+            allowRemoteContent: AppSettings.effectiveAllowRemoteContent
+            backgroundColor: root.unread ? Theme.accentSoft : Theme.surfaceRaised
+            foregroundColor: root.unread ? Theme.accent : Theme.textSecondary
         }
 
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumWidth: 0
             spacing: 2
             RowLayout {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 spacing: 8
                 Rectangle {
                     visible: root.unread
@@ -80,14 +91,19 @@ Rectangle {
                     color: Theme.accent
                 }
                 Text {
+                    objectName: "messageRowSender"
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: root.sender
                     textFormat: Text.PlainText
                     color: Theme.text
                     font.family: Theme.fontFamily
                     font.pixelSize: 13
                     font.weight: root.unread ? Font.Bold : Font.DemiBold
+                    wrapMode: Text.NoWrap
+                    maximumLineCount: 1
                     elide: Text.ElideRight
+                    clip: true
                 }
                 Text {
                     visible: root.conversationCount > 1
@@ -100,31 +116,47 @@ Rectangle {
                 }
                 Text {
                     text: root.timestamp
+                    Layout.minimumWidth: 0
+                    Layout.maximumWidth: 72
                     textFormat: Text.PlainText
                     color: root.unread ? Theme.accent : Theme.textMuted
                     font.family: Theme.fontFamily
                     font.pixelSize: 10
+                    wrapMode: Text.NoWrap
+                    maximumLineCount: 1
+                    elide: Text.ElideRight
+                    clip: true
                 }
             }
             Text {
+                objectName: "messageRowSubject"
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: root.subject
                 textFormat: Text.PlainText
                 color: Theme.text
                 font.family: Theme.fontFamily
                 font.pixelSize: 12
                 font.weight: root.unread ? Font.DemiBold : Font.Normal
+                wrapMode: Text.NoWrap
+                maximumLineCount: 1
                 elide: Text.ElideRight
+                clip: true
             }
             Text {
+                objectName: "messageRowSnippet"
                 visible: !root.compact
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: root.snippet
                 textFormat: Text.PlainText
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: 11
+                wrapMode: Text.NoWrap
+                maximumLineCount: 1
                 elide: Text.ElideRight
+                clip: true
             }
         }
 

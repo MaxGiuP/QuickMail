@@ -12,6 +12,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -30,7 +31,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, RwLock, broadcast, watch},
+    sync::{Mutex, RwLock, broadcast, mpsc, watch},
     task::JoinSet,
 };
 use tracing::{debug, warn};
@@ -43,6 +44,8 @@ use crate::{
 
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_IN_FLIGHT_REQUESTS: usize = 32;
+const CONNECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const SYNC_PAGE_SIZE: u32 = 200;
 const SYNC_FLAG_RECONCILE_SIZE: u32 = 64;
 const MAX_SAFE_STYLESHEET_BYTES: usize = 256 * 1024;
@@ -70,7 +73,10 @@ const SAFE_CSS_PROPERTIES: &[&str] = &[
     "border-top-style",
     "border-top-width",
     "border-width",
+    "box-sizing",
     "color",
+    "direction",
+    "display",
     "float",
     "font",
     "font-family",
@@ -79,21 +85,38 @@ const SAFE_CSS_PROPERTIES: &[&str] = &[
     "font-style",
     "font-variant",
     "font-weight",
+    "height",
+    "letter-spacing",
     "line-height",
     "margin-bottom",
     "margin-left",
     "margin-right",
     "margin-top",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "object-fit",
+    "overflow",
+    "overflow-wrap",
+    "overflow-x",
+    "overflow-y",
     "padding",
     "padding-bottom",
     "padding-left",
     "padding-right",
     "padding-top",
+    "table-layout",
+    "text-align",
     "text-decoration",
     "text-indent",
+    "text-overflow",
     "text-transform",
     "vertical-align",
     "white-space",
+    "width",
+    "word-break",
+    "word-wrap",
     "word-spacing",
 ];
 
@@ -111,7 +134,17 @@ static HTML_SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         // HTML. It carries a color only (never a resource URL), so retaining
         // it restores legacy message backgrounds without weakening the
         // remote-content boundary.
-        .add_generic_attributes(&["style", "bgcolor", "class", "id", "data-ogsc", "data-ogsb"])
+        .add_generic_attributes(&[
+            "style",
+            "bgcolor",
+            "class",
+            "id",
+            "data-ogsc",
+            "data-ogsb",
+            "width",
+            "height",
+            "align",
+        ])
         .filter_style_properties(SAFE_CSS_PROPERTIES.iter().copied().collect())
         .attribute_filter(|element, attribute, value| {
             if element == "img" && attribute == "src" {
@@ -120,7 +153,17 @@ static HTML_SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
                     .unwrap_or(false);
                 return allowed.then(|| value.into());
             }
+            if attribute == "style" {
+                let sanitized = sanitize_css_declarations(value);
+                return (!sanitized.is_empty()).then(|| sanitized.into());
+            }
             if attribute == "bgcolor" && !is_safe_legacy_color(value) {
+                return None;
+            }
+            if matches!(attribute, "width" | "height") && !is_safe_legacy_dimension(value) {
+                return None;
+            }
+            if attribute == "align" && !is_safe_legacy_alignment(value) {
                 return None;
             }
             if matches!(attribute, "class" | "id" | "data-ogsc" | "data-ogsb")
@@ -151,6 +194,35 @@ fn is_safe_legacy_color(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+}
+
+fn is_safe_legacy_dimension(value: &str) -> bool {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return true;
+    }
+    if let Some(number) = value.strip_suffix('%') {
+        return is_bounded_ascii_integer(number, 1_000);
+    }
+    let lowercase = value.to_ascii_lowercase();
+    let number = lowercase.strip_suffix("px").unwrap_or(&lowercase);
+    is_bounded_ascii_integer(number, 16_384)
+}
+
+fn is_bounded_ascii_integer(number: &str, maximum: u32) -> bool {
+    !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && number
+            .parse::<u32>()
+            .map(|dimension| dimension <= maximum)
+            .unwrap_or(false)
+}
+
+fn is_safe_legacy_alignment(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "left" | "right" | "center" | "justify" | "char" | "middle"
+    )
 }
 
 #[derive(Debug, Error)]
@@ -417,6 +489,25 @@ impl Daemon {
         let mut buffer = Vec::with_capacity(4096);
         let mut topics = HashSet::new();
         let mut events = self.events.subscribe();
+        let (responses_sender, mut responses_receiver) = mpsc::channel(MAX_IN_FLIGHT_REQUESTS);
+        let (serialized_sender, mut serialized_receiver) =
+            mpsc::channel::<InboundRpcRequest>(MAX_IN_FLIGHT_REQUESTS);
+        let mut pending_serialized = None;
+        let mut requests = JoinSet::new();
+        let serialized_daemon = self.clone();
+        let serialized_responses = responses_sender.clone();
+        requests.spawn(async move {
+            while let Some(request) = serialized_receiver.recv().await {
+                let mut ignored_topics = HashSet::new();
+                if let Some(response) = serialized_daemon
+                    .dispatch_inbound(request, &mut ignored_topics)
+                    .await
+                    && serialized_responses.send(response).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         loop {
             buffer.clear();
@@ -431,7 +522,11 @@ impl Daemon {
                         Ok(event) if topics.contains("*") || topics.contains(&event.topic) => {
                             let notification = RpcNotification::new(event.method, event.params)
                                 .expect("JSON values always serialize");
-                            write_json_line(&mut writer, &notification).await?;
+                            if write_json_line(&mut writer, &notification, &mut shutdown).await?
+                                == ConnectionWrite::Shutdown
+                            {
+                                break;
+                            }
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -439,35 +534,110 @@ impl Daemon {
                                 "system.resync_required",
                                 json!({"skipped": skipped}),
                             ).expect("JSON values always serialize");
-                            write_json_line(&mut writer, &notification).await?;
+                            if write_json_line(&mut writer, &notification, &mut shutdown).await?
+                                == ConnectionWrite::Shutdown
+                            {
+                                break;
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                read = reader.read_until(b'\n', &mut buffer) => {
+                Some(response) = responses_receiver.recv() => {
+                    if write_json_line(&mut writer, &response, &mut shutdown).await?
+                        == ConnectionWrite::Shutdown
+                    {
+                        break;
+                    }
+                }
+                Some(result) = requests.join_next(), if !requests.is_empty() => {
+                    if let Err(error) = result {
+                        debug!(%error, "RPC request task ended unexpectedly");
+                    }
+                }
+                permit = serialized_sender.reserve(), if pending_serialized.is_some() => {
+                    match permit {
+                        Ok(permit) => {
+                            permit.send(
+                                pending_serialized
+                                    .take()
+                                    .expect("serialized request exists while reserving capacity"),
+                            );
+                        }
+                        Err(_) => break,
+                    }
+                }
+                read = reader.read_until(b'\n', &mut buffer),
+                    if pending_serialized.is_none()
+                        && requests.len() < MAX_IN_FLIGHT_REQUESTS => {
                     let read = read?;
                     if read == 0 {
                         break;
                     }
                     if buffer.len() > MAX_REQUEST_BYTES {
-                        write_json_line(
+                        let _ = write_json_line(
                             &mut writer,
                             &RpcResponse::failure(RpcId::Null, RpcError::invalid_request("request exceeds 1 MiB")),
+                            &mut shutdown,
                         ).await?;
                         break;
                     }
-                    let response = match serde_json::from_slice::<InboundRpcRequest>(&buffer) {
-                        Ok(request) => tokio::select! {
+                    let request = match serde_json::from_slice::<InboundRpcRequest>(&buffer) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            if write_json_line(
+                                &mut writer,
+                                &RpcResponse::failure(
+                                    RpcId::Null,
+                                    RpcError { code: -32700, message: "parse error".into(), data: Some(json!({"detail": error.to_string()})) },
+                                ),
+                                &mut shutdown,
+                            ).await? == ConnectionWrite::Shutdown {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Subscription changes are intentionally ordered with the
+                    // frames around them. Mutating/provider requests retain a
+                    // single ordered lane, while cache-backed reader requests
+                    // may complete out of order by JSON-RPC ID. This prevents
+                    // slow synchronization or mark-read work from blocking an
+                    // already-cached body without reordering user mutations.
+                    if request.method == method::SUBSCRIBE {
+                        let response = tokio::select! {
                             _ = wait_for_shutdown(&mut shutdown) => break,
                             response = self.dispatch_inbound(request, &mut topics) => response,
-                        },
-                        Err(error) => Some(RpcResponse::failure(
-                            RpcId::Null,
-                            RpcError { code: -32700, message: "parse error".into(), data: Some(json!({"detail": error.to_string()})) },
-                        )),
-                    };
-                    if let Some(response) = response {
-                        write_json_line(&mut writer, &response).await?;
+                        };
+                        if let Some(response) = response
+                            && write_json_line(&mut writer, &response, &mut shutdown).await?
+                                == ConnectionWrite::Shutdown
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if matches!(request.method.as_str(), method::MAIL_GET | method::THREAD_GET) {
+                        let daemon = self.clone();
+                        let responses_sender = responses_sender.clone();
+                        requests.spawn(async move {
+                            let mut ignored_topics = HashSet::new();
+                            if let Some(response) = daemon
+                                .dispatch_inbound(request, &mut ignored_topics)
+                                .await
+                            {
+                                let _ = responses_sender.send(response).await;
+                            }
+                        });
+                    } else {
+                        // Retain one request locally while the ordered lane is
+                        // full. Reserving capacity in the outer select keeps
+                        // response writes and shutdown cancellation live; an
+                        // awaited send here can deadlock with the worker when
+                        // both bounded queues fill in opposite directions.
+                        pending_serialized = Some(request);
                     }
                 }
             }
@@ -712,26 +882,47 @@ impl Daemon {
             }
             method::MAIL_GET => {
                 let params: MessageIdParams = decode(params)?;
-                if let Some((mut message, true)) = self
+                let mut cached = self
                     .database
                     .get_cached_message(&params.message_id)
                     .await
-                    .map_err(storage_rpc_error)?
-                {
-                    sanitize_message_html(&mut message);
+                    .map_err(storage_rpc_error)?;
+                if let Some((message, true)) = cached.as_mut() {
+                    sanitize_message_html(message);
                     return encode(message);
                 }
-                let provider = self.provider_for_message(&params.message_id).await?;
-                let mut message = provider
-                    .get_message(&params.message_id)
-                    .await
-                    .map_err(provider_rpc_error)?;
-                sanitize_message_html(&mut message);
-                self.database
-                    .upsert_messages(std::slice::from_ref(&message))
-                    .await
-                    .map_err(storage_rpc_error)?;
-                encode(message)
+                let refreshed = match self.provider_for_message(&params.message_id).await {
+                    Ok(provider) => provider
+                        .get_message(&params.message_id)
+                        .await
+                        .map_err(provider_rpc_error),
+                    Err(error) => Err(error),
+                };
+                match refreshed {
+                    Ok(mut message) => {
+                        sanitize_message_html(&mut message);
+                        self.database
+                            .upsert_messages(std::slice::from_ref(&message))
+                            .await
+                            .map_err(storage_rpc_error)?;
+                        encode(message)
+                    }
+                    Err(error) => {
+                        // Schema migrations can mark cached HTML stale when the
+                        // sanitizer changes. Prefer a provider refetch, but do
+                        // not make already-downloaded mail unreadable offline.
+                        // Re-run the current sanitizer before returning the old
+                        // payload so the fallback never bypasses new policy.
+                        if let Some((mut message, _)) = cached.filter(|(message, body_loaded)| {
+                            !*body_loaded && message.body_html.is_some()
+                        }) {
+                            sanitize_message_html(&mut message);
+                            encode(message)
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
             }
             method::THREAD_GET => {
                 let params: MessageIdParams = decode(params)?;
@@ -1694,12 +1885,72 @@ fn sanitize_css_declarations(input: &str) -> String {
         };
         let property = property.trim().to_ascii_lowercase();
         let value = value.trim();
-        if !SAFE_CSS_PROPERTIES.contains(&property.as_str()) || !safe_css_value(value) {
+        if !SAFE_CSS_PROPERTIES.contains(&property.as_str())
+            || !safe_css_property_value(&property, value)
+        {
             continue;
         }
         kept.push(format!("{property}:{value}"));
     }
     kept.join(";")
+}
+
+fn safe_css_property_value(property: &str, value: &str) -> bool {
+    safe_css_value(value)
+        && (!matches!(
+            property,
+            "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height"
+        ) || safe_css_dimension(value))
+}
+
+fn safe_css_dimension(value: &str) -> bool {
+    let lowercase = value.trim().to_ascii_lowercase();
+    let value = lowercase
+        .strip_suffix("!important")
+        .map(str::trim_end)
+        .unwrap_or(&lowercase);
+    if matches!(
+        value,
+        "auto"
+            | "none"
+            | "inherit"
+            | "initial"
+            | "unset"
+            | "revert"
+            | "min-content"
+            | "max-content"
+            | "fit-content"
+            | "stretch"
+    ) {
+        return true;
+    }
+
+    let number_end = value
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit() || *byte == b'.')
+        .count();
+    if number_end == 0 {
+        return false;
+    }
+    let (number, unit) = value.split_at(number_end);
+    let Ok(number) = number.parse::<f64>() else {
+        return false;
+    };
+    if !number.is_finite() || number < 0.0 {
+        return false;
+    }
+    let maximum = match unit {
+        "" | "px" | "q" => 16_384.0,
+        "%" | "vw" | "vh" | "vmin" | "vmax" => 1_000.0,
+        "em" | "rem" | "lh" | "rlh" | "pc" => 1_024.0,
+        "ex" | "ch" | "cap" | "ic" => 2_048.0,
+        "pt" => 12_288.0,
+        "in" => 170.0,
+        "cm" => 430.0,
+        "mm" => 4_300.0,
+        _ => return false,
+    };
+    number <= maximum
 }
 
 fn safe_css_selector(selector: &str) -> bool {
@@ -1956,13 +2207,38 @@ fn safe_attachment_name(filename: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionWrite {
+    Complete,
+    Shutdown,
+}
+
 async fn write_json_line(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     value: &impl Serialize,
-) -> Result<(), io::Error> {
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<ConnectionWrite, io::Error> {
     let mut payload = serde_json::to_vec(value).map_err(io::Error::other)?;
     payload.push(b'\n');
-    writer.write_all(&payload).await
+    // Cancelling `write_all` may leave a partial frame in the kernel buffer.
+    // Both cancellation paths make the caller close this connection instead
+    // of reusing the writer, so partial bytes can only be followed by EOF and
+    // can never be spliced together with a later JSON-RPC frame.
+    tokio::select! {
+        biased;
+        _ = wait_for_shutdown(shutdown) => Ok(ConnectionWrite::Shutdown),
+        result = tokio::time::timeout(
+            CONNECTION_WRITE_TIMEOUT,
+            writer.write_all(&payload),
+        ) => match result {
+            Ok(Ok(())) => Ok(ConnectionWrite::Complete),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "JSON-RPC client did not read within the write deadline",
+            )),
+        },
+    }
 }
 
 struct BoundUserSocket {
@@ -2261,6 +2537,104 @@ mod tests {
         }
     }
 
+    struct CacheRefreshProvider {
+        account: Account,
+        refreshed: Option<Message>,
+        get_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MailProvider for CacheRefreshProvider {
+        fn kind(&self) -> &'static str {
+            "cache-refresh"
+        }
+
+        fn account(&self) -> &Account {
+            &self.account
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_messages(&self, _query: MessageQuery) -> Result<MessagePage, ProviderError> {
+            Ok(MessagePage {
+                messages: Vec::new(),
+                next_cursor: None,
+            })
+        }
+
+        async fn get_message(&self, _id: &str) -> Result<Message, ProviderError> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            self.refreshed
+                .clone()
+                .ok_or_else(|| ProviderError::Temporary("provider is offline".into()))
+        }
+
+        async fn apply_action(&self, _action: MailAction) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        async fn send(&self, _message: OutgoingMessage) -> Result<String, ProviderError> {
+            Err(ProviderError::Unsupported("send".into()))
+        }
+    }
+
+    fn cache_refresh_account() -> Account {
+        Account {
+            id: "cache-account".into(),
+            address: "reader@example.com".into(),
+            display_name: "Reader".into(),
+            provider: "cache-refresh".into(),
+            protocol: "IMAP".into(),
+            host: "example.com".into(),
+            unread: 1,
+            total: 1,
+            enabled: true,
+        }
+    }
+
+    fn cached_html_message(account: &Account) -> Message {
+        Message {
+            summary: MessageSummary {
+                id: quickmail_core::normalized_message_id(&account.id, "stale-message"),
+                account_id: account.id.clone(),
+                mailbox_id: Some("inbox".into()),
+                thread_id: None,
+                subject: "Cached HTML".into(),
+                author: Some(Address {
+                    name: "Sender".into(),
+                    address: "sender@example.com".into(),
+                }),
+                timestamp: Utc::now(),
+                read: false,
+                starred: false,
+                snippet: "Previously downloaded".into(),
+                has_attachments: false,
+                labels: vec!["Inbox".into()],
+                provider_data: json!({"nativeId": "stale-message"}),
+            },
+            to: vec![Address {
+                name: "Reader".into(),
+                address: account.address.clone(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            body_text: Some("Old cached body".into()),
+            body_html: Some(
+                r#"<style>.old { color:red; position:fixed; background-image:url(file:///secret) }</style>
+                    <div class="old" onclick="steal()">Old cached body<script>steal()</script>
+                    <a href="javascript:steal()">unsafe</a></div>"#
+                    .into(),
+            ),
+            attachments: Vec::new(),
+        }
+    }
+
     struct BlockingAttachmentProvider {
         account: Account,
         started: Arc<Semaphore>,
@@ -2323,6 +2697,64 @@ mod tests {
                 content_type: "text/plain".into(),
                 bytes: b"must not survive removal".to_vec(),
             })
+        }
+    }
+
+    struct BlockingActionProvider {
+        account: Account,
+        started: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl MailProvider for BlockingActionProvider {
+        fn kind(&self) -> &'static str {
+            "blocking-action"
+        }
+
+        fn account(&self) -> &Account {
+            &self.account
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        async fn list_mailboxes(&self) -> Result<Vec<Mailbox>, ProviderError> {
+            Ok(vec![])
+        }
+
+        async fn list_messages(&self, _query: MessageQuery) -> Result<MessagePage, ProviderError> {
+            Ok(MessagePage {
+                messages: vec![],
+                next_cursor: None,
+            })
+        }
+
+        async fn get_message(&self, _id: &str) -> Result<Message, ProviderError> {
+            Err(ProviderError::NotFound)
+        }
+
+        async fn apply_action(&self, _action: MailAction) -> Result<(), ProviderError> {
+            self.started.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .map_err(|_| ProviderError::Temporary("action test interrupted".into()))?
+                .forget();
+            Ok(())
+        }
+
+        async fn send(&self, _message: OutgoingMessage) -> Result<String, ProviderError> {
+            Err(ProviderError::Unsupported("send".into()))
+        }
+
+        async fn get_attachment(
+            &self,
+            _message_id: &str,
+            _attachment_id: &str,
+        ) -> Result<AttachmentData, ProviderError> {
+            Err(ProviderError::Unsupported("attachments".into()))
         }
     }
 
@@ -2871,18 +3303,23 @@ mod tests {
             r##"<!doctype html><html><head>
                 <style>
                     .mail-card { background-color:#123456; color:rgb(250, 240, 230);
+                        box-sizing:border-box; width:700px; max-width:100%;
+                        text-align:center; overflow-wrap:anywhere;
                         background-image:url(https://tracker.invalid/background.png) }
+                    .oversized { width:999999999px; min-height:999999999px }
                     @import url(https://tracker.invalid/import.css);
                 </style>
                 </head><body bgcolor="#f4f1ea" style="color:#202124">
-                <div class="mail-card" onclick="bad()" style="color:red; background-image:url(file:///secret); font-weight:bold">
+                <div class="mail-card" onclick="bad()" style="color:red; background-image:url(file:///secret); font-weight:bold; min-width:0; position:fixed">
+                <div class="oversized" style="height:999999999px">oversized</div>
                 <script>bad()</script>
-                <img src="https://images.example/pixel.png" onerror="bad()">
+                <img src="https://images.example/pixel.png" width="101" height="auto" onerror="bad()">
                 <img src="f&#x69;le:///home/person/private.png">
                 <a href="javascript:bad()">unsafe</a>
                 <a href="mailto:person@example.com">mail</a>
                 <a href="/relative">relative</a>
-                <table bgcolor='#123456'><tr><td bgcolor="navy">colored</td></tr></table>
+                <table width="700" align="center" bgcolor='#123456'><tr><td bgcolor="navy">colored</td></tr></table>
+                <div width="999999" height="-1" align="evil">bounded layout</div>
                 <div bgcolor="url(https://tracker.invalid)">invalid color</div>
             </div></body></html>"##,
         );
@@ -2891,7 +3328,10 @@ mod tests {
         assert_eq!(cleaned.matches("src=").count(), 1);
         assert!(cleaned.contains("color:red"));
         assert!(cleaned.contains("font-weight:bold"));
-        assert!(cleaned.contains(".mail-card{background-color:#123456;color:rgb(250, 240, 230)}"));
+        assert!(cleaned.contains("min-width:0"));
+        assert!(cleaned.contains(
+            ".mail-card{background-color:#123456;color:rgb(250, 240, 230);box-sizing:border-box;width:700px;max-width:100%;text-align:center;overflow-wrap:anywhere}"
+        ));
         assert!(cleaned.contains("class=\"mail-card\""));
         assert!(cleaned.contains("class=\"quickmail-body\""));
         assert!(cleaned.contains("background-color:#f4f1ea"));
@@ -2899,7 +3339,15 @@ mod tests {
         assert!(cleaned.contains("mailto:person@example.com"));
         assert!(cleaned.contains("bgcolor=\"#123456\""));
         assert!(cleaned.contains("bgcolor=\"navy\""));
+        assert!(cleaned.contains("width=\"700\""));
+        assert!(cleaned.contains("align=\"center\""));
+        assert!(cleaned.contains("width=\"101\""));
+        assert!(cleaned.contains("height=\"auto\""));
         assert!(!cleaned.contains("bgcolor=\"url"));
+        assert!(!cleaned.contains("position:fixed"));
+        assert!(!cleaned.contains("999999"));
+        assert!(!cleaned.contains("height=\"-1\""));
+        assert!(!cleaned.contains("align=\"evil\""));
         for forbidden in [
             "onclick",
             "onerror",
@@ -2912,6 +3360,31 @@ mod tests {
             "href=\"/relative\"",
         ] {
             assert!(!cleaned.contains(forbidden), "survived: {forbidden}");
+        }
+    }
+
+    #[test]
+    fn css_dimensions_are_bounded_before_html_reaches_the_client() {
+        for allowed in [
+            "0",
+            "700px",
+            "100%",
+            "12.5rem",
+            "auto",
+            "none",
+            "700px !important",
+        ] {
+            assert!(safe_css_dimension(allowed), "rejected {allowed}");
+        }
+        for rejected in [
+            "-1px",
+            "16385px",
+            "1001%",
+            "999999999px",
+            "calc(100% + 1px)",
+            "700furlongs",
+        ] {
+            assert!(!safe_css_dimension(rejected), "accepted {rejected}");
         }
     }
 
@@ -2929,6 +3402,140 @@ mod tests {
         assert!(cleaned.is_char_boundary(cleaned.len()));
         assert!(cleaned.contains('é'));
         assert!(cleaned.ends_with('}'));
+    }
+
+    #[tokio::test]
+    async fn stale_html_cache_is_replaced_after_a_successful_provider_refetch() {
+        let account = cache_refresh_account();
+        let cached = cached_html_message(&account);
+        let mut refreshed = cached.clone();
+        refreshed.body_text = Some("Fresh provider body".into());
+        refreshed.body_html = Some(
+            r#"<table width="700" align="center"><tr><td>Fresh provider body</td></tr></table>
+                <script>must_not_survive()</script>"#
+                .into(),
+        );
+
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account).await.unwrap();
+        database
+            .upsert_messages(std::slice::from_ref(&cached))
+            .await
+            .unwrap();
+        database
+            .mark_cached_html_stale_for_test(&cached.summary.id)
+            .await
+            .unwrap();
+        let provider = Arc::new(CacheRefreshProvider {
+            account: account.clone(),
+            refreshed: Some(refreshed),
+            get_calls: AtomicUsize::new(0),
+        });
+        let daemon = Daemon::new(database.clone());
+        daemon
+            .providers
+            .write()
+            .await
+            .insert(account.id.clone(), provider.clone());
+
+        let fetched = daemon
+            .dispatch_inner(
+                method::MAIL_GET,
+                json!({"messageId": cached.summary.id}),
+                &mut HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched["bodyText"], "Fresh provider body");
+        assert!(
+            fetched["bodyHtml"]
+                .as_str()
+                .unwrap()
+                .contains("width=\"700\"")
+        );
+        assert!(!fetched["bodyHtml"].as_str().unwrap().contains("<script"));
+
+        let (stored, body_loaded) = database
+            .get_cached_message(&cached.summary.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(body_loaded);
+        assert_eq!(stored.body_text.as_deref(), Some("Fresh provider body"));
+        assert!(!stored.body_html.as_deref().unwrap().contains("<script"));
+
+        daemon
+            .dispatch_inner(
+                method::MAIL_GET,
+                json!({"messageId": cached.summary.id}),
+                &mut HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.get_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_html_cache_is_safely_available_when_provider_is_offline() {
+        let account = cache_refresh_account();
+        let cached = cached_html_message(&account);
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account).await.unwrap();
+        database
+            .upsert_messages(std::slice::from_ref(&cached))
+            .await
+            .unwrap();
+        database
+            .mark_cached_html_stale_for_test(&cached.summary.id)
+            .await
+            .unwrap();
+        let provider = Arc::new(CacheRefreshProvider {
+            account: account.clone(),
+            refreshed: None,
+            get_calls: AtomicUsize::new(0),
+        });
+        let daemon = Daemon::new(database.clone());
+        daemon
+            .providers
+            .write()
+            .await
+            .insert(account.id.clone(), provider.clone());
+
+        let fetched = daemon
+            .dispatch_inner(
+                method::MAIL_GET,
+                json!({"messageId": cached.summary.id}),
+                &mut HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched["bodyText"], "Old cached body");
+        let html = fetched["bodyHtml"].as_str().unwrap();
+        assert!(html.contains("Old cached body"));
+        assert!(html.contains("color:red"));
+        for forbidden in [
+            "onclick",
+            "<script",
+            "javascript:",
+            "file:",
+            "position:fixed",
+            "background-image",
+        ] {
+            assert!(
+                !html.contains(forbidden),
+                "stale fallback leaked {forbidden}"
+            );
+        }
+        assert_eq!(provider.get_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !database
+                .get_cached_message(&cached.summary.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            "offline fallback must remain stale so a later read retries the provider"
+        );
     }
 
     #[tokio::test]
@@ -3088,6 +3695,403 @@ mod tests {
         assert_eq!(notification.method, "mail.changed");
         assert_eq!(notification.params["revision"], 9);
 
+        shutdown_sender.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipelined_serialized_requests_over_queue_capacity_all_complete() {
+        let directory = tempdir().unwrap();
+        let socket = private_socket_path(directory.path(), "serialized-backpressure.sock");
+        let daemon = Daemon::new(Database::open_in_memory().unwrap());
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move {
+            daemon
+                .run_with_shutdown(server_socket, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+        });
+        wait_for_socket(&socket).await;
+
+        let stream = UnixStream::connect(&socket).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let request_count = MAX_IN_FLIGHT_REQUESTS * 4 + 1;
+        let frames = (1..=request_count)
+            .map(|id| {
+                format!(
+                    "{}\n",
+                    json!({"jsonrpc": "2.0", "id": id, "method": "ping", "params": {}})
+                )
+            })
+            .collect::<String>();
+        writer.write_all(frames.as_bytes()).await.unwrap();
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut completed = HashSet::new();
+            for _ in 0..request_count {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                let response: RpcResponse = serde_json::from_str(&line).unwrap();
+                assert_eq!(response.result.unwrap()["pong"], true);
+                assert!(completed.insert(response.id), "duplicate response id");
+            }
+            completed
+        })
+        .await
+        .expect("bounded request and response queues deadlocked");
+        let expected = (1..=request_count)
+            .map(|id| RpcId::Number(id as i64))
+            .collect::<HashSet<_>>();
+        assert_eq!(completed, expected);
+
+        drop(writer);
+        shutdown_sender.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stays_live_with_an_over_capacity_serialized_pipeline() {
+        let directory = tempdir().unwrap();
+        let socket = private_socket_path(directory.path(), "serialized-shutdown.sock");
+        let account = Account {
+            id: "shutdown-account".into(),
+            address: "shutdown@example.com".into(),
+            display_name: "Shutdown".into(),
+            provider: "blocking-action".into(),
+            protocol: "IMAP".into(),
+            host: "example.com".into(),
+            unread: 1,
+            total: 1,
+            enabled: true,
+        };
+        let message = Message {
+            summary: MessageSummary {
+                id: quickmail_core::normalized_message_id(&account.id, "queued-message"),
+                account_id: account.id.clone(),
+                mailbox_id: Some("inbox".into()),
+                thread_id: None,
+                subject: "Queued action".into(),
+                author: None,
+                timestamp: Utc::now(),
+                read: false,
+                starred: false,
+                snippet: String::new(),
+                has_attachments: false,
+                labels: vec!["Inbox".into()],
+                provider_data: json!({"nativeId": "queued-message"}),
+            },
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            body_text: Some("Queued body".into()),
+            body_html: None,
+            attachments: vec![],
+        };
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account).await.unwrap();
+        database
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        let action_started = Arc::new(Semaphore::new(0));
+        let provider = Arc::new(BlockingActionProvider {
+            account: account.clone(),
+            started: action_started.clone(),
+            release: Arc::new(Semaphore::new(0)),
+        });
+        let daemon = Daemon::new(database);
+        daemon
+            .providers
+            .write()
+            .await
+            .insert(account.id.clone(), provider);
+
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move {
+            daemon
+                .run_with_shutdown(server_socket, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+        });
+        wait_for_socket(&socket).await;
+
+        let stream = UnixStream::connect(&socket).await.unwrap();
+        let (_reader, mut writer) = stream.into_split();
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "mail.action",
+                        "params": {
+                            "kind": "mark_read",
+                            "messageIds": [message.summary.id],
+                            "read": true
+                        }
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), action_started.acquire())
+            .await
+            .expect("provider action did not start")
+            .unwrap()
+            .forget();
+
+        let frames = (0..MAX_IN_FLIGHT_REQUESTS + 2)
+            .map(|index| {
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": index + 2,
+                        "method": "ping",
+                        "params": {}
+                    })
+                )
+            })
+            .collect::<String>();
+        writer.write_all(frames.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        shutdown_sender.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("shutdown was blocked by a full serialized request queue")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_outbound_write_to_a_non_reading_client() {
+        let (mut server_stream, client_stream) = StdUnixStream::pair().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+        client_stream.set_nonblocking(true).unwrap();
+
+        // Fill the server-to-client direction before starting the connection
+        // loop. The client intentionally retains but never reads its half, so
+        // the first JSON-RPC response is guaranteed to encounter backpressure.
+        let pressure = [b'x'; 16 * 1024];
+        let mut pressure_bytes = 0;
+        loop {
+            match std::io::Write::write(&mut server_stream, &pressure) {
+                Ok(0) => panic!("socket stopped accepting pressure bytes without blocking"),
+                Ok(written) => {
+                    pressure_bytes += written;
+                    assert!(
+                        pressure_bytes <= 16 * 1024 * 1024,
+                        "socket did not apply bounded outbound backpressure"
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("could not fill socket send buffer: {error}"),
+            }
+        }
+        assert!(pressure_bytes > 0);
+
+        let server_stream = UnixStream::from_std(server_stream).unwrap();
+        let client_stream = UnixStream::from_std(client_stream).unwrap();
+        let daemon = Daemon::new(Database::open_in_memory().unwrap());
+        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let connection = tokio::spawn(async move {
+            daemon
+                .handle_connection(server_stream, shutdown_receiver)
+                .await
+        });
+
+        let (_unread_client_half, mut writer) = client_stream.into_split();
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "subscribe",
+                        "params": {"topics": ["mail"]}
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !connection.is_finished(),
+            "connection exited before its response reached outbound pressure"
+        );
+
+        shutdown_sender.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), connection)
+            .await
+            .expect("outbound socket pressure prevented connection shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_reader_requests_bypass_a_blocked_provider_action_on_one_connection() {
+        let directory = tempdir().unwrap();
+        let socket = private_socket_path(directory.path(), "reader-priority.sock");
+        let account = Account {
+            id: "reader-account".into(),
+            address: "reader@example.com".into(),
+            display_name: "Reader".into(),
+            provider: "blocking-action".into(),
+            protocol: "IMAP".into(),
+            host: "example.com".into(),
+            unread: 1,
+            total: 1,
+            enabled: true,
+        };
+        let message = Message {
+            summary: MessageSummary {
+                id: quickmail_core::normalized_message_id(&account.id, "cached-message"),
+                account_id: account.id.clone(),
+                mailbox_id: Some("inbox".into()),
+                thread_id: Some(format!("{}:cached-thread", account.id)),
+                subject: "Cached body".into(),
+                author: Some(Address {
+                    name: "Sender".into(),
+                    address: "sender@example.com".into(),
+                }),
+                timestamp: Utc::now(),
+                read: false,
+                starred: false,
+                snippet: "Cached summary".into(),
+                has_attachments: false,
+                labels: vec!["Inbox".into()],
+                provider_data: json!({"nativeId": "cached-message"}),
+            },
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            body_text: Some("Cached content is ready".into()),
+            body_html: None,
+            attachments: vec![],
+        };
+        let database = Database::open_in_memory().unwrap();
+        database.upsert_account(&account).await.unwrap();
+        database
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        let action_started = Arc::new(Semaphore::new(0));
+        let action_release = Arc::new(Semaphore::new(0));
+        let provider = Arc::new(BlockingActionProvider {
+            account: account.clone(),
+            started: action_started.clone(),
+            release: action_release.clone(),
+        });
+        let daemon = Daemon::new(database);
+        daemon
+            .providers
+            .write()
+            .await
+            .insert(account.id.clone(), provider);
+
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move {
+            daemon
+                .run_with_shutdown(server_socket, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+        });
+        wait_for_socket(&socket).await;
+        let stream = UnixStream::connect(&socket).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "mail.action",
+                        "params": {
+                            "kind": "mark_read",
+                            "messageIds": [message.summary.id],
+                            "read": true
+                        }
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), action_started.acquire())
+            .await
+            .expect("provider action did not start")
+            .unwrap()
+            .forget();
+
+        writer
+            .write_all(
+                format!(
+                    "{}\n{}\n",
+                    json!({
+                        "jsonrpc": "2.0", "id": 2, "method": "thread.get",
+                        "params": {"messageId": message.summary.id}
+                    }),
+                    json!({
+                        "jsonrpc": "2.0", "id": 3, "method": "mail.get",
+                        "params": {"messageId": message.summary.id}
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let mut completed = HashSet::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+                .await
+                .expect("cached reader request waited for the provider mutation")
+                .unwrap();
+            let response: RpcResponse = serde_json::from_str(&line).unwrap();
+            assert!(response.error.is_none(), "{:?}", response.error);
+            match response.id {
+                RpcId::Number(2) => {
+                    assert_eq!(
+                        response.result.unwrap()["messages"][0]["id"],
+                        message.summary.id
+                    );
+                    completed.insert(2);
+                }
+                RpcId::Number(3) => {
+                    assert_eq!(
+                        response.result.unwrap()["bodyText"],
+                        "Cached content is ready"
+                    );
+                    completed.insert(3);
+                }
+                id => panic!("blocked action completed before release: {id:?}"),
+            }
+        }
+        assert_eq!(completed, HashSet::from([2, 3]));
+
+        action_release.add_permits(1);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+            .await
+            .expect("released provider action did not finish")
+            .unwrap();
+        let response: RpcResponse = serde_json::from_str(&line).unwrap();
+        assert_eq!(response.id, RpcId::Number(1));
+        assert!(response.error.is_none(), "{:?}", response.error);
+
+        drop(writer);
         shutdown_sender.send(()).unwrap();
         server.await.unwrap().unwrap();
     }

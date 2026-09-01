@@ -22,7 +22,16 @@ Item {
     readonly property real composeOpacity: composePane.opacity
     readonly property real composePanelWidth: composePane.width
     readonly property real composePanelHeight: composePane.height
+    readonly property bool composeReplacementQueued: composePane.transitionQueued
+    readonly property bool composeSending: composePane.sending
+    readonly property bool composeDiscarding: composePane.discarding
+    readonly property string composeRecipientText: composePane.recipientText
+    readonly property string composeSubjectText: composePane.subjectText
+    readonly property string composeBodyText: composePane.editorBodyText
     readonly property string renderedMessageHtml: messageReaderPane.renderedBodyHtml
+    property bool windowClosePending: false
+    readonly property bool safeToReplace: composePane.safeToReplace
+    signal windowCloseReady()
 
     function openAccountSetup(account) {
         accountToEdit = account || null
@@ -48,7 +57,13 @@ Item {
     }
 
     function startContextCompose(mode, message) {
-        composePane.startAnother(mode, message)
+        return composePane.startAnother(mode, message)
+    }
+
+    function startMailto(uri) {
+        if (!composePane.acceptsMailto(uri)) return false
+        cancelWindowClose()
+        return composePane.startMailto(uri)
     }
 
     function saveCompose() {
@@ -69,6 +84,32 @@ Item {
 
     function discardCompose() {
         composePane.discard()
+    }
+
+    function sendCompose() {
+        composePane.send()
+    }
+
+    function prepareWindowClose() {
+        if (windowClosePending) return
+        if (!composePane.open) {
+            windowCloseReady()
+            return
+        }
+        windowClosePending = true
+        composePane.requestClose()
+    }
+
+    function cancelWindowClose() {
+        if (!windowClosePending) return
+        windowClosePending = false
+        composePane.cancelCloseRequest()
+    }
+
+    onComposeVisibleChanged: {
+        if (!windowClosePending || composeVisible) return
+        windowClosePending = false
+        windowCloseReady()
     }
 
     Rectangle {
@@ -179,6 +220,7 @@ Item {
                 open: store.view === "compose"
                 store: root.store
                 z: 10
+                onCloseOperationFailed: root.windowClosePending = false
 
                 Behavior on width {
                     NumberAnimation { duration: 180; easing.type: Easing.OutCubic }

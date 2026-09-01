@@ -18,8 +18,9 @@ Windows Mail-inspired QML interface.
   provider-neutral conversation threads.
 - A Gmail-style bottom-right composer that minimizes into a tab while the mail
   list and reader remain available.
-- Rich HTML mail with allowlist sanitization, remote images enabled by default,
-  and a persisted reader toggle to block them.
+- Rich HTML mail with allowlist sanitization, viewport-aware fixed-width table
+  handling, best-effort sender avatars, remote content enabled by default, and
+  a persisted reader toggle to block every remote image and avatar lookup.
 - SQLite WAL caching and FTS5 search behind a private JSON-RPC Unix socket.
 - Dashboard, task, and calendar RPC APIs ready for Quickshell agenda widgets.
 - mailto handling and a user systemd service.

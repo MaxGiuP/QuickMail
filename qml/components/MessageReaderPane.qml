@@ -14,17 +14,21 @@ Rectangle {
     property string attachmentStatus: ""
     property string pendingSaveSource: ""
     property bool htmlRenderFailed: false
+    readonly property bool threadAvatarLayoutReady: _threadAvatarLayoutReady
+    property bool _threadAvatarLayoutReady: false
+    property int _threadAvatarLayoutGeneration: 0
     signal backRequested()
     signal composeRequested(string mode, var message)
 
     color: Theme.surface
 
     readonly property var message: store.selectedMessage || ({})
-    readonly property string sender: String(message.from_name || message.sender_name
+    readonly property string sender: singleLine(message.from_name || message.sender_name
         || (message.author && (message.author.name || message.author.address))
-        || message.from || message.from_address || "Unknown sender")
-    readonly property string senderAddress: String((message.author && message.author.address)
+        || message.from || message.from_address || "Unknown sender") || "Unknown sender"
+    readonly property string senderAddress: singleLine((message.author && message.author.address)
         || message.from_address || message.from || "")
+    readonly property string senderAvatarUrl: avatarUrl(message)
     readonly property string recipient: addressList(message.to_display || message.to || "")
     readonly property string bodyText: store.messageBodyText(message)
     readonly property string bodyHtml: String(message.bodyHtml || message.body_html || "")
@@ -35,15 +39,50 @@ Rectangle {
     readonly property string timestampText: formatTimestamp(message.date_display
         || message.received_display || message.timestamp || message.received_at || "")
 
+    function deferThreadAvatarLayout() {
+        const generation = ++_threadAvatarLayoutGeneration
+        _threadAvatarLayoutReady = false
+        // A Repeater creates every delegate at y=0 before ColumnLayout's
+        // polish pass. Waiting for two event turns keeps those provisional
+        // coordinates from activating every network-backed avatar Loader.
+        Qt.callLater(function() {
+            Qt.callLater(function() {
+                if (generation === root._threadAvatarLayoutGeneration)
+                    root._threadAvatarLayoutReady = true
+            })
+        })
+    }
+
+    onThreadCountChanged: deferThreadAvatarLayout()
+    Component.onCompleted: deferThreadAvatarLayout()
+
+    function singleLine(value) {
+        return String(value === undefined || value === null ? "" : value)
+            .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+            .replace(/\s+/g, " ").trim()
+    }
+
     function addressList(value) {
         if (!Array.isArray(value)) return String(value || "")
         return value.map(entry => entry.name || entry.address || "").filter(Boolean).join(", ")
     }
 
     function threadSender(item) {
-        return String(item && (item.from_name || item.sender_name
+        return singleLine(item && (item.from_name || item.sender_name
             || (item.author && (item.author.name || item.author.address))
-            || item.from || item.from_address) || "Unknown sender")
+            || item.from || item.from_address) || "Unknown sender") || "Unknown sender"
+    }
+
+    function senderAddressFor(item) {
+        return singleLine(item && ((item.author && item.author.address)
+            || item.from_address || item.from) || "")
+    }
+
+    function avatarUrl(item) {
+        return String(item && (item.avatarUrl || item.avatar_url
+            || item.photoUrl || item.photo_url
+            || (item.author && (item.author.avatarUrl || item.author.avatar_url
+                || item.author.photoUrl || item.author.photo_url))) || "")
     }
 
     function threadSelected(item) {
@@ -208,6 +247,7 @@ Rectangle {
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar {}
+            onWidthChanged: root.deferThreadAvatarLayout()
 
             ColumnLayout {
                 id: article
@@ -229,6 +269,7 @@ Rectangle {
                 }
 
                 ColumnLayout {
+                    id: threadSection
                     Layout.fillWidth: true
                     visible: store.threadLoading || root.threadCount > 1
                     spacing: 4
@@ -258,10 +299,38 @@ Rectangle {
                         model: store.threadMessages
                         delegate: Rectangle {
                             id: threadCard
+                            objectName: "threadCard"
                             required property var modelData
                             required property int index
+                            readonly property bool hasFinalLayoutGeometry:
+                                root.threadAvatarLayoutReady
+                                && threadSection.visible
+                                && bodyFlick.visible
+                                && bodyFlick.width > 0
+                                && bodyFlick.height > 0
+                                && threadCard.width > 0
+                                && threadCard.height > 0
+                                // All delegates are provisionally y=0. The
+                                // summary row precedes the first real card, so
+                                // a positive y proves ColumnLayout positioned it.
+                                && threadCard.y > 0
+                            readonly property bool intersectsViewport: {
+                                // Re-evaluate both when the layout settles and
+                                // while the outer article scrolls. Offscreen
+                                // conversation members should not create image
+                                // loaders or disclose their sender addresses.
+                                const layoutPosition = threadCard.y
+                                const top = threadCard.mapToItem(
+                                    bodyFlick.contentItem, 0, 0).y
+                                return layoutPosition >= 0
+                                    && top + threadCard.height
+                                        >= bodyFlick.contentY - threadCard.height
+                                    && top <= bodyFlick.contentY
+                                        + bodyFlick.height + threadCard.height
+                            }
                             Layout.fillWidth: true
                             Layout.preferredHeight: 56
+                            clip: true
                             radius: Theme.radiusSmall
                             color: root.threadSelected(modelData)
                                 ? Theme.surfaceSelected : Theme.surfaceRaised
@@ -277,51 +346,70 @@ Rectangle {
                                 anchors.leftMargin: 12
                                 anchors.rightMargin: 12
                                 spacing: 10
-                                Rectangle {
+                                Loader {
+                                    objectName: "threadCardAvatarLoader"
                                     Layout.preferredWidth: 30
                                     Layout.preferredHeight: 30
-                                    radius: 15
-                                    color: Theme.accentSoft
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: Theme.initials(root.threadSender(threadCard.modelData))
-                                        textFormat: Text.PlainText
-                                        color: Theme.accent
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: 10
-                                        font.weight: Font.Bold
+                                    active: threadCard.hasFinalLayoutGeometry
+                                        && threadCard.intersectsViewport
+                                    sourceComponent: Component {
+                                        SenderAvatar {
+                                            objectName: "threadCardAvatar"
+                                            displayName: root.threadSender(threadCard.modelData)
+                                            address: root.senderAddressFor(threadCard.modelData)
+                                            avatarUrl: root.avatarUrl(threadCard.modelData)
+                                            allowRemoteContent: AppSettings.effectiveAllowRemoteContent
+                                        }
                                     }
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
                                     spacing: 1
                                     Text {
+                                        objectName: "threadCardSender"
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         text: root.threadSender(threadCard.modelData)
                                         textFormat: Text.PlainText
                                         color: Theme.text
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 12
                                         font.weight: Font.DemiBold
+                                        wrapMode: Text.NoWrap
+                                        maximumLineCount: 1
                                         elide: Text.ElideRight
+                                        clip: true
                                     }
                                     Text {
+                                        objectName: "threadCardSnippet"
                                         Layout.fillWidth: true
-                                        text: String(threadCard.modelData.snippet || "")
+                                        Layout.minimumWidth: 0
+                                        text: root.singleLine(threadCard.modelData.snippet || "")
                                         textFormat: Text.PlainText
                                         color: Theme.textMuted
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 10
+                                        wrapMode: Text.NoWrap
+                                        maximumLineCount: 1
                                         elide: Text.ElideRight
+                                        clip: true
                                     }
                                 }
                                 Text {
-                                    text: root.formatTimestamp(threadCard.modelData.timestamp
-                                        || threadCard.modelData.received_at || "")
+                                    Layout.minimumWidth: 0
+                                    Layout.maximumWidth: 110
+                                    text: root.singleLine(root.formatTimestamp(
+                                        threadCard.modelData.timestamp
+                                            || threadCard.modelData.received_at || ""))
                                     textFormat: Text.PlainText
                                     color: Theme.textMuted
                                     font.family: Theme.fontFamily
                                     font.pixelSize: 10
+                                    wrapMode: Text.NoWrap
+                                    maximumLineCount: 1
+                                    elide: Text.ElideRight
+                                    clip: true
                                 }
                             }
 
@@ -346,20 +434,14 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
-                    Rectangle {
+                    SenderAvatar {
+                        objectName: "messageHeaderAvatar"
                         Layout.preferredWidth: 42
                         Layout.preferredHeight: 42
-                        radius: 21
-                        color: Theme.accentSoft
-                        Text {
-                            anchors.centerIn: parent
-                            text: Theme.initials(root.sender)
-                            textFormat: Text.PlainText
-                            color: Theme.accent
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 13
-                            font.weight: Font.Bold
-                        }
+                        displayName: root.sender
+                        address: root.senderAddress
+                        avatarUrl: root.senderAvatarUrl
+                        allowRemoteContent: AppSettings.effectiveAllowRemoteContent
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -421,7 +503,7 @@ Rectangle {
                             mutedColor: Theme.textMuted
                             linkColor: Theme.accent
                             pageColor: Theme.surface
-                            allowRemoteContent: AppSettings.allowRemoteContent
+                            allowRemoteContent: AppSettings.effectiveAllowRemoteContent
                             onHtmlChanged: htmlLoader.loadedHtml = html
                             Component.onCompleted: htmlLoader.loadedHtml = html
                         }
@@ -605,5 +687,6 @@ Rectangle {
         attachmentStatus = ""
         pendingSaveSource = ""
         htmlRenderFailed = false
+        deferThreadAvatarLayout()
     }
 }

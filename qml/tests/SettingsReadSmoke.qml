@@ -21,6 +21,10 @@ Item {
                 root.fail("remote-content choice did not survive a new process")
                 return
             }
+            if (AppSettings.effectiveAllowRemoteContent !== false) {
+                root.fail("the effective remote-content policy ignored the saved opt-out")
+                return
+            }
             Qt.quit()
         }
     }

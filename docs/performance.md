@@ -3,8 +3,11 @@
 The UI never performs mail-protocol or database work. It requests
 cursor-paginated summaries over one persistent local socket and retrieves a
 body only when the user opens a message. The one optional UI-side network path
-is loading allowlisted HTTP(S) images from sanitized HTML when remote content
-is enabled.
+is remote image loading when remote content is enabled: allowlisted HTTP(S)
+images from sanitized HTML, plus cached best-effort sender-avatar lookups for
+visible rows. Avatar lookups use Gravatar for normalized address hashes and a
+domain favicon for recognized automated/brand senders; they never delay the
+message list and fall back to initials.
 
 The daemon uses:
 

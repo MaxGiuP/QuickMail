@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_THREAD_MESSAGES: usize = 100;
 
@@ -260,6 +260,22 @@ impl Database {
         let id = id.to_owned();
         self.call(move |repository| repository.get_cached_message(&id))
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn mark_cached_html_stale_for_test(
+        &self,
+        id: &str,
+    ) -> Result<(), StorageError> {
+        let id = id.to_owned();
+        self.call(move |repository| {
+            repository.connection.execute(
+                "UPDATE messages SET body_loaded=0 WHERE id=?1 AND body_html IS NOT NULL",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn get_thread(&self, message_id: &str) -> Result<ThreadConversation, StorageError> {
@@ -1680,10 +1696,10 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                message_json TEXT NOT NULL, updated_at INTEGER NOT NULL
              );
              CREATE INDEX idx_drafts_account_updated ON drafts(account_id, updated_at DESC, id);
-             PRAGMA user_version=5;
+             PRAGMA user_version=6;
              COMMIT;",
         )?;
-        version = 5;
+        version = 6;
     }
     if version == 1 {
         connection.execute_batch(
@@ -1742,6 +1758,24 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
             // but cannot benefit from the optional thread index.
             connection.pragma_update(None, "user_version", 5)?;
         }
+        version = 5;
+    }
+    if version == 5 {
+        // HTML is sanitized before it enters the cache. When that allowlist
+        // changes, an already-sanitized body cannot recover presentation data
+        // that an older version discarded. Mark HTML bodies stale so the next
+        // mail.get prefers a complete provider refetch under the current
+        // sanitizer policy. Keep the old payload as an offline fallback: it is
+        // sanitized again before being returned. Plain-text-only bodies remain
+        // valid and do not create unnecessary network work.
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE messages
+                SET body_loaded=0
+              WHERE body_html IS NOT NULL;
+             PRAGMA user_version=6;
+             COMMIT;",
+        )?;
     }
     Ok(())
 }
@@ -2314,6 +2348,59 @@ mod tests {
                 .as_deref(),
             Some("777:42")
         );
+    }
+
+    #[test]
+    fn schema_five_migration_marks_html_stale_without_discarding_cached_payload() {
+        let mut repository = Repository::open_in_memory().unwrap();
+        repository.upsert_account(&account()).unwrap();
+
+        let mut html = message(41);
+        html.summary.has_attachments = true;
+        html.to = vec![Address {
+            name: "Recipient".into(),
+            address: "recipient@example.com".into(),
+        }];
+        html.body_html =
+            Some("<table width=\"700\" align=\"center\"><tr><td>mail</td></tr></table>".into());
+        html.attachments = vec![quickmail_core::Attachment {
+            id: "attachment-1".into(),
+            filename: "agenda.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 42,
+            inline: false,
+            content_id: None,
+        }];
+        let expected_html = html.clone();
+        let plain = message(42);
+        repository.upsert_messages(&[html, plain.clone()]).unwrap();
+        repository
+            .connection
+            .pragma_update(None, "user_version", 5)
+            .unwrap();
+
+        migrate(&repository.connection).unwrap();
+
+        assert_eq!(repository.schema_version().unwrap(), SCHEMA_VERSION);
+        let (invalidated, body_loaded) = repository
+            .get_cached_message("account-1:message-00041")
+            .unwrap()
+            .unwrap();
+        assert!(!body_loaded);
+        assert_eq!(invalidated.to, expected_html.to);
+        assert_eq!(invalidated.cc, expected_html.cc);
+        assert_eq!(invalidated.bcc, expected_html.bcc);
+        assert_eq!(invalidated.body_text, expected_html.body_text);
+        assert_eq!(invalidated.body_html, expected_html.body_html);
+        assert_eq!(invalidated.attachments, expected_html.attachments);
+        assert!(invalidated.summary.has_attachments);
+
+        let (still_cached, body_loaded) = repository
+            .get_cached_message("account-1:message-00042")
+            .unwrap()
+            .unwrap();
+        assert!(body_loaded);
+        assert_eq!(still_cached.body_text, plain.body_text);
     }
 
     #[tokio::test]

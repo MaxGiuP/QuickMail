@@ -7,7 +7,7 @@ use async_imap::{
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use futures_util::TryStreamExt;
+use futures_util::{TryStreamExt, future::BoxFuture};
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
     address::Envelope as LettreEnvelope,
@@ -290,6 +290,28 @@ async fn bounded_imap<T>(
         .map_err(|_| ImapError::CommandTimeout)?
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionErrorAction {
+    Return,
+    InvalidateAndReturn,
+    InvalidateAndRetry,
+}
+
+fn session_error_action(
+    error: &ImapError,
+    retry_safe: bool,
+    already_retried: bool,
+) -> SessionErrorAction {
+    if !matches!(error, ImapError::Connection(_) | ImapError::CommandTimeout) {
+        return SessionErrorAction::Return;
+    }
+    if retry_safe && !already_retried {
+        SessionErrorAction::InvalidateAndRetry
+    } else {
+        SessionErrorAction::InvalidateAndReturn
+    }
+}
+
 /// A long-lived, TLS-only IMAP transport. All commands share one authenticated
 /// session, which avoids reconnecting (or spawning a process) per request.
 pub(crate) struct AsyncImapTransport {
@@ -329,7 +351,7 @@ impl AsyncImapTransport {
         let address = (self.config.imap_host.as_str(), self.config.imap_port);
         let tcp = TcpStream::connect(address)
             .await
-            .map_err(|error| ImapError::Protocol(error.to_string()))?;
+            .map_err(|error| ImapError::Connection(error.to_string()))?;
         let server_name = rustls::pki_types::ServerName::try_from(self.config.imap_host.clone())
             .map_err(|_| ImapError::InvalidConfiguration("invalid IMAP TLS server name"))?;
 
@@ -338,24 +360,24 @@ impl AsyncImapTransport {
                 .tls
                 .connect(server_name, tcp)
                 .await
-                .map_err(|error| ImapError::Protocol(error.to_string()))?,
+                .map_err(|error| ImapError::Connection(error.to_string()))?,
             ConnectionSecurity::StartTls => {
                 let mut client = async_imap::Client::new(tcp);
                 client
                     .read_response()
                     .await
-                    .map_err(|error| ImapError::Protocol(error.to_string()))?
+                    .map_err(|error| ImapError::Connection(error.to_string()))?
                     .ok_or_else(|| {
-                        ImapError::Protocol("IMAP server closed before greeting".into())
+                        ImapError::Connection("IMAP server closed before greeting".into())
                     })?;
                 client
                     .run_command_and_check_ok("STARTTLS", None)
                     .await
-                    .map_err(|error| ImapError::Protocol(error.to_string()))?;
+                    .map_err(imap_protocol_error)?;
                 self.tls
                     .connect(server_name, client.into_inner())
                     .await
-                    .map_err(|error| ImapError::Protocol(error.to_string()))?
+                    .map_err(|error| ImapError::Connection(error.to_string()))?
             }
         };
 
@@ -364,14 +386,16 @@ impl AsyncImapTransport {
             client
                 .read_response()
                 .await
-                .map_err(|error| ImapError::Protocol(error.to_string()))?
-                .ok_or_else(|| ImapError::Protocol("IMAP server closed before greeting".into()))?;
+                .map_err(|error| ImapError::Connection(error.to_string()))?
+                .ok_or_else(|| {
+                    ImapError::Connection("IMAP server closed before greeting".into())
+                })?;
         }
         match &self.config.imap_authentication {
             ImapAuthentication::Password { username, password } => client
                 .login(username, password.expose_secret())
                 .await
-                .map_err(|_| ImapError::Authentication),
+                .map_err(|(error, _client)| imap_authentication_error(error)),
             ImapAuthentication::OAuthBearer {
                 username,
                 access_token,
@@ -383,7 +407,7 @@ impl AsyncImapTransport {
                 client
                     .authenticate("XOAUTH2", &mut authenticator)
                     .await
-                    .map_err(|_| ImapError::Authentication)
+                    .map_err(|(error, _client)| imap_authentication_error(error))
             }
             ImapAuthentication::OAuthSource { username, tokens } => {
                 let token = tokens
@@ -397,7 +421,7 @@ impl AsyncImapTransport {
                 client
                     .authenticate("XOAUTH2", &mut authenticator)
                     .await
-                    .map_err(|_| ImapError::Authentication)
+                    .map_err(|(error, _client)| imap_authentication_error(error))
             }
         }
     }
@@ -410,6 +434,48 @@ impl AsyncImapTransport {
             *guard = Some(bounded_imap(IMAP_COMMAND_TIMEOUT, self.connect()).await?);
         }
         Ok(guard)
+    }
+
+    async fn run_session_operation<T, F>(
+        &self,
+        retry_safe: bool,
+        mut operation: F,
+    ) -> Result<T, ImapError>
+    where
+        F: for<'session> FnMut(
+            &'session mut ImapSession,
+        ) -> BoxFuture<'session, Result<T, ImapError>>,
+    {
+        let mut already_retried = false;
+        loop {
+            let mut guard = match self.lock_session().await {
+                Ok(guard) => guard,
+                Err(error) => match session_error_action(&error, retry_safe, already_retried) {
+                    SessionErrorAction::InvalidateAndRetry => {
+                        already_retried = true;
+                        continue;
+                    }
+                    SessionErrorAction::Return | SessionErrorAction::InvalidateAndReturn => {
+                        return Err(error);
+                    }
+                },
+            };
+            let result = operation(guard.as_mut().expect("session initialized")).await;
+            let Some(error) = result.as_ref().err() else {
+                return result;
+            };
+            match session_error_action(error, retry_safe, already_retried) {
+                SessionErrorAction::Return => return result,
+                SessionErrorAction::InvalidateAndReturn => {
+                    *guard = None;
+                    return result;
+                }
+                SessionErrorAction::InvalidateAndRetry => {
+                    *guard = None;
+                    already_retried = true;
+                }
+            }
+        }
     }
 }
 
@@ -433,47 +499,45 @@ impl Authenticator for &mut Xoauth2<'_> {
 #[async_trait]
 impl ImapTransport for AsyncImapTransport {
     async fn capabilities(&self) -> Result<ImapCapabilities, ImapError> {
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        let capabilities =
-            match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, session.capabilities()).await {
-                Ok(result) => result.map_err(imap_protocol_error)?,
-                Err(_) => {
-                    *guard = None;
-                    return Err(ImapError::CommandTimeout);
-                }
-            };
-        let values = capabilities
-            .iter()
-            .map(|capability| match capability {
-                Capability::Imap4rev1 => "IMAP4REV1".to_owned(),
-                Capability::Auth(name) => format!("AUTH={name}"),
-                Capability::Atom(name) => name.to_ascii_uppercase(),
+        self.run_session_operation(true, |session| {
+            Box::pin(async move {
+                let capabilities =
+                    tokio::time::timeout(IMAP_COMMAND_TIMEOUT, session.capabilities())
+                        .await
+                        .map_err(|_| ImapError::CommandTimeout)?
+                        .map_err(imap_protocol_error)?;
+                let values = capabilities
+                    .iter()
+                    .map(|capability| match capability {
+                        Capability::Imap4rev1 => "IMAP4REV1".to_owned(),
+                        Capability::Auth(name) => format!("AUTH={name}"),
+                        Capability::Atom(name) => name.to_ascii_uppercase(),
+                    })
+                    .collect();
+                Ok(ImapCapabilities(values))
             })
-            .collect();
-        Ok(ImapCapabilities(values))
+        })
+        .await
     }
 
     async fn list_mailboxes(&self) -> Result<Vec<ImapMailboxInfo>, ImapError> {
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        let names = match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            session
-                .list(None, Some("*"))
-                .await
-                .map_err(imap_protocol_error)?
-                .try_collect::<Vec<_>>()
-                .await
-                .map_err(imap_protocol_error)
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                *guard = None;
-                return Err(ImapError::CommandTimeout);
-            }
-        };
+        let names = self
+            .run_session_operation(true, |session| {
+                Box::pin(async move {
+                    tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                        session
+                            .list(None, Some("*"))
+                            .await
+                            .map_err(imap_protocol_error)?
+                            .try_collect::<Vec<_>>()
+                            .await
+                            .map_err(imap_protocol_error)
+                    })
+                    .await
+                    .map_err(|_| ImapError::CommandTimeout)?
+                })
+            })
+            .await?;
         let mut mailboxes = names
             .into_iter()
             .filter(|name| !name.attributes().contains(&NameAttribute::NoSelect))
@@ -488,43 +552,77 @@ impl ImapTransport for AsyncImapTransport {
         // UID sync state. Prioritize Inbox, then bound the entire count pass so
         // one slow folder cannot stall account loading indefinitely.
         mailboxes.sort_by_key(|mailbox| mailbox.role != Some(MailboxRole::Inbox));
-        let deadline = tokio::time::Instant::now() + IMAP_STATUS_BUDGET;
-        let mut status_timed_out = false;
-        for mailbox in &mut mailboxes {
-            let status = tokio::time::timeout_at(
-                deadline,
-                session.status(&mailbox.name, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"),
-            )
-            .await;
-            match status {
-                Ok(Ok(status)) => {
-                    let (total, unread) = mailbox_counts(&status);
-                    mailbox.total = total;
-                    mailbox.unread = unread;
-                }
-                Ok(Err(_)) => continue,
-                Err(_) => {
-                    status_timed_out = true;
-                    break;
+        let mut already_retried = false;
+        loop {
+            let mut guard = match self.lock_session().await {
+                Ok(guard) => guard,
+                Err(error) => match session_error_action(&error, true, already_retried) {
+                    SessionErrorAction::InvalidateAndRetry => {
+                        already_retried = true;
+                        continue;
+                    }
+                    SessionErrorAction::Return | SessionErrorAction::InvalidateAndReturn => {
+                        return Err(error);
+                    }
+                },
+            };
+            let session = guard.as_mut().expect("session initialized");
+            let mut current = mailboxes.clone();
+            let deadline = tokio::time::Instant::now() + IMAP_STATUS_BUDGET;
+            let mut connection_error = None;
+            let mut status_timed_out = false;
+            for mailbox in &mut current {
+                let status = tokio::time::timeout_at(
+                    deadline,
+                    session.status(&mailbox.name, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"),
+                )
+                .await;
+                match status {
+                    Ok(Ok(status)) => {
+                        let (total, unread) = mailbox_counts(&status);
+                        mailbox.total = total;
+                        mailbox.unread = unread;
+                    }
+                    Ok(Err(error)) if imap_connection_failed(&error) => {
+                        connection_error = Some(imap_protocol_error(error));
+                        break;
+                    }
+                    Ok(Err(_)) => continue,
+                    Err(_) => {
+                        status_timed_out = true;
+                        break;
+                    }
                 }
             }
+            if status_timed_out {
+                // Cancelling an in-flight IMAP command leaves its tagged
+                // response pending, so the pooled connection cannot be reused.
+                *guard = None;
+                return Ok(current);
+            }
+            if let Some(error) = connection_error {
+                *guard = None;
+                if !already_retried {
+                    already_retried = true;
+                    continue;
+                }
+                return Err(error);
+            }
+            return Ok(current);
         }
-        if status_timed_out {
-            *guard = None;
-        }
-        Ok(mailboxes)
     }
 
     async fn select(&self, mailbox: &str) -> Result<SelectedMailbox, ImapError> {
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, select_mailbox(session, mailbox)).await {
-            Ok(result) => result,
-            Err(_) => {
-                *guard = None;
-                Err(ImapError::CommandTimeout)
-            }
-        }
+        let mailbox = mailbox.to_owned();
+        self.run_session_operation(true, move |session| {
+            let mailbox = mailbox.clone();
+            Box::pin(async move {
+                tokio::time::timeout(IMAP_COMMAND_TIMEOUT, select_mailbox(session, &mailbox))
+                    .await
+                    .map_err(|_| ImapError::CommandTimeout)?
+            })
+        })
+        .await
     }
 
     async fn search_uids(
@@ -549,28 +647,29 @@ impl ImapTransport for AsyncImapTransport {
         if let Some(search) = search.filter(|value| !value.trim().is_empty()) {
             terms.push(format!("TEXT {}", quote_imap(search)?));
         }
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        let uids = match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            Ok::<_, ImapError>(
-                session
-                    .uid_search(terms.join(" "))
+        let mailbox = mailbox.to_owned();
+        let uids = self
+            .run_session_operation(true, move |session| {
+                let mailbox = mailbox.clone();
+                let terms = terms.clone();
+                Box::pin(async move {
+                    tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                        select_mailbox(session, &mailbox).await?;
+                        Ok::<_, ImapError>(
+                            session
+                                .uid_search(terms.join(" "))
+                                .await
+                                .map_err(imap_protocol_error)?
+                                .into_iter()
+                                .map(u64::from)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
                     .await
-                    .map_err(imap_protocol_error)?
-                    .into_iter()
-                    .map(u64::from)
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                *guard = None;
-                return Err(ImapError::CommandTimeout);
-            }
-        };
+                    .map_err(|_| ImapError::CommandTimeout)?
+                })
+            })
+            .await?;
         Ok(newest_uid_page(uids, before_uid, limit))
     }
 
@@ -585,31 +684,32 @@ impl ImapTransport for AsyncImapTransport {
             return Ok(Vec::new());
         }
         let limit = limit.max(1) as usize;
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        let uids = match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            let mut uids = BTreeSet::new();
-            for (first_uid, last_uid) in windows {
-                let window = session
-                    .uid_search(format!("UID {first_uid}:{last_uid}"))
+        let mailbox = mailbox.to_owned();
+        let uids = self
+            .run_session_operation(true, move |session| {
+                let mailbox = mailbox.clone();
+                let windows = windows.clone();
+                Box::pin(async move {
+                    tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                        select_mailbox(session, &mailbox).await?;
+                        let mut uids = BTreeSet::new();
+                        for (first_uid, last_uid) in windows {
+                            let window = session
+                                .uid_search(format!("UID {first_uid}:{last_uid}"))
+                                .await
+                                .map_err(imap_protocol_error)?;
+                            uids.extend(window.into_iter().map(u64::from));
+                            if uids.len() >= limit {
+                                break;
+                            }
+                        }
+                        Ok::<_, ImapError>(uids.into_iter().collect::<Vec<_>>())
+                    })
                     .await
-                    .map_err(imap_protocol_error)?;
-                uids.extend(window.into_iter().map(u64::from));
-                if uids.len() >= limit {
-                    break;
-                }
-            }
-            Ok::<_, ImapError>(uids.into_iter().collect::<Vec<_>>())
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                *guard = None;
-                return Err(ImapError::CommandTimeout);
-            }
-        };
+                    .map_err(|_| ImapError::CommandTimeout)?
+                })
+            })
+            .await?;
         Ok(newest_uid_page(uids, 0, limit as u32))
     }
 
@@ -628,28 +728,29 @@ impl ImapTransport for AsyncImapTransport {
                 high_uid: after_uid,
             });
         };
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        let uids = match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            Ok::<_, ImapError>(
-                session
-                    .uid_search(uid_range)
+        let mailbox = mailbox.to_owned();
+        let uids = self
+            .run_session_operation(true, move |session| {
+                let mailbox = mailbox.clone();
+                let uid_range = uid_range.clone();
+                Box::pin(async move {
+                    tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                        select_mailbox(session, &mailbox).await?;
+                        Ok::<_, ImapError>(
+                            session
+                                .uid_search(uid_range)
+                                .await
+                                .map_err(imap_protocol_error)?
+                                .into_iter()
+                                .map(u64::from)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
                     .await
-                    .map_err(imap_protocol_error)?
-                    .into_iter()
-                    .map(u64::from)
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                *guard = None;
-                return Err(ImapError::CommandTimeout);
-            }
-        };
+                    .map_err(|_| ImapError::CommandTimeout)?
+                })
+            })
+            .await?;
         Ok(incremental_uid_page(
             uids,
             after_uid,
@@ -667,26 +768,27 @@ impl ImapTransport for AsyncImapTransport {
             return Ok(Vec::new());
         }
         let uid_set = uid_set(uids)?;
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        let fetches = match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            session
-                .uid_fetch(uid_set, IMAP_SUMMARY_FETCH)
-                .await
-                .map_err(imap_protocol_error)?
-                .try_collect::<Vec<_>>()
-                .await
-                .map_err(imap_protocol_error)
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                *guard = None;
-                return Err(ImapError::CommandTimeout);
-            }
-        };
+        let mailbox = mailbox.to_owned();
+        let fetches = self
+            .run_session_operation(true, move |session| {
+                let mailbox = mailbox.clone();
+                let uid_set = uid_set.clone();
+                Box::pin(async move {
+                    tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                        select_mailbox(session, &mailbox).await?;
+                        session
+                            .uid_fetch(uid_set, IMAP_SUMMARY_FETCH)
+                            .await
+                            .map_err(imap_protocol_error)?
+                            .try_collect::<Vec<_>>()
+                            .await
+                            .map_err(imap_protocol_error)
+                    })
+                    .await
+                    .map_err(|_| ImapError::CommandTimeout)?
+                })
+            })
+            .await?;
         let mut envelopes = fetches
             .into_iter()
             .map(|fetch| {
@@ -714,52 +816,51 @@ impl ImapTransport for AsyncImapTransport {
     }
 
     async fn fetch_raw(&self, mailbox: &str, uid: u64) -> Result<Vec<u8>, ImapError> {
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            let declared_size = {
-                let mut fetches = session
-                    .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
-                    .await
-                    .map_err(imap_protocol_error)?;
-                let fetch = fetches
-                    .try_next()
-                    .await
-                    .map_err(imap_protocol_error)?
-                    .ok_or(ImapError::NotFound)?;
-                fetch
-                    .size
-                    .map(|size| size as usize)
-                    .ok_or(ImapError::MissingMessageSize)?
-            };
-            validate_raw_message_size(declared_size, MAX_MAIL_MESSAGE_BYTES)?;
+        let mailbox = mailbox.to_owned();
+        self.run_session_operation(true, move |session| {
+            let mailbox = mailbox.clone();
+            Box::pin(async move {
+                tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                    select_mailbox(session, &mailbox).await?;
+                    let declared_size = {
+                        let mut fetches = session
+                            .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
+                            .await
+                            .map_err(imap_protocol_error)?;
+                        let fetch = fetches
+                            .try_next()
+                            .await
+                            .map_err(imap_protocol_error)?
+                            .ok_or(ImapError::NotFound)?;
+                        fetch
+                            .size
+                            .map(|size| size as usize)
+                            .ok_or(ImapError::MissingMessageSize)?
+                    };
+                    validate_raw_message_size(declared_size, MAX_MAIL_MESSAGE_BYTES)?;
 
-            let query = bounded_raw_fetch_query(MAX_MAIL_MESSAGE_BYTES);
-            let mut fetches = session
-                .uid_fetch(uid.to_string(), query)
+                    let query = bounded_raw_fetch_query(MAX_MAIL_MESSAGE_BYTES);
+                    let mut fetches = session
+                        .uid_fetch(uid.to_string(), query)
+                        .await
+                        .map_err(imap_protocol_error)?;
+                    let fetch = fetches
+                        .try_next()
+                        .await
+                        .map_err(imap_protocol_error)?
+                        .ok_or(ImapError::NotFound)?;
+                    let raw = fetch
+                        .body()
+                        .map(ToOwned::to_owned)
+                        .ok_or(ImapError::NotFound)?;
+                    validate_raw_message_size(raw.len(), MAX_MAIL_MESSAGE_BYTES)?;
+                    Ok(raw)
+                })
                 .await
-                .map_err(imap_protocol_error)?;
-            let fetch = fetches
-                .try_next()
-                .await
-                .map_err(imap_protocol_error)?
-                .ok_or(ImapError::NotFound)?;
-            let raw = fetch
-                .body()
-                .map(ToOwned::to_owned)
-                .ok_or(ImapError::NotFound)?;
-            validate_raw_message_size(raw.len(), MAX_MAIL_MESSAGE_BYTES)?;
-            Ok(raw)
+                .map_err(|_| ImapError::CommandTimeout)?
+            })
         })
         .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                *guard = None;
-                Err(ImapError::CommandTimeout)
-            }
-        }
     }
 
     async fn store_flags(
@@ -775,38 +876,40 @@ impl ImapTransport for AsyncImapTransport {
         let uid_set = uid_set(uids)?;
         let add = validated_flags(add)?;
         let remove = validated_flags(remove)?;
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            if !add.is_empty() {
-                session
-                    .uid_store(&uid_set, format!("+FLAGS.SILENT ({})", add.join(" ")))
-                    .await
-                    .map_err(imap_protocol_error)?
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(imap_protocol_error)?;
-            }
-            if !remove.is_empty() {
-                session
-                    .uid_store(&uid_set, format!("-FLAGS.SILENT ({})", remove.join(" ")))
-                    .await
-                    .map_err(imap_protocol_error)?
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(imap_protocol_error)?;
-            }
-            Ok(())
+        let mailbox = mailbox.to_owned();
+        self.run_session_operation(false, move |session| {
+            let mailbox = mailbox.clone();
+            let uid_set = uid_set.clone();
+            let add = add.clone();
+            let remove = remove.clone();
+            Box::pin(async move {
+                tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                    select_mailbox(session, &mailbox).await?;
+                    if !add.is_empty() {
+                        session
+                            .uid_store(&uid_set, format!("+FLAGS.SILENT ({})", add.join(" ")))
+                            .await
+                            .map_err(imap_protocol_error)?
+                            .try_collect::<Vec<_>>()
+                            .await
+                            .map_err(imap_protocol_error)?;
+                    }
+                    if !remove.is_empty() {
+                        session
+                            .uid_store(&uid_set, format!("-FLAGS.SILENT ({})", remove.join(" ")))
+                            .await
+                            .map_err(imap_protocol_error)?
+                            .try_collect::<Vec<_>>()
+                            .await
+                            .map_err(imap_protocol_error)?;
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|_| ImapError::CommandTimeout)?
+            })
         })
         .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                *guard = None;
-                Err(ImapError::CommandTimeout)
-            }
-        }
     }
 
     async fn move_uids(
@@ -820,51 +923,53 @@ impl ImapTransport for AsyncImapTransport {
         }
         let uid_set = uid_set(uids)?;
         validate_imap_text(destination)?;
-        let mut guard = self.lock_session().await?;
-        let session = guard.as_mut().expect("session initialized");
-        match tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
-            select_mailbox(session, mailbox).await?;
-            let capabilities = session.capabilities().await.map_err(imap_protocol_error)?;
-            if capabilities.has_str("MOVE") {
-                session
-                    .run_command_and_check_ok(format!(
-                        "UID MOVE {uid_set} {}",
-                        quote_imap(destination)?
-                    ))
-                    .await
-                    .map_err(imap_protocol_error)?;
-                return Ok(());
-            }
-            session
-                .uid_copy(&uid_set, destination)
+        let mailbox = mailbox.to_owned();
+        let destination = destination.to_owned();
+        self.run_session_operation(false, move |session| {
+            let mailbox = mailbox.clone();
+            let destination = destination.clone();
+            let uid_set = uid_set.clone();
+            Box::pin(async move {
+                tokio::time::timeout(IMAP_COMMAND_TIMEOUT, async {
+                    select_mailbox(session, &mailbox).await?;
+                    let capabilities = session.capabilities().await.map_err(imap_protocol_error)?;
+                    if capabilities.has_str("MOVE") {
+                        session
+                            .run_command_and_check_ok(format!(
+                                "UID MOVE {uid_set} {}",
+                                quote_imap(&destination)?
+                            ))
+                            .await
+                            .map_err(imap_protocol_error)?;
+                        return Ok(());
+                    }
+                    session
+                        .uid_copy(&uid_set, &destination)
+                        .await
+                        .map_err(imap_protocol_error)?;
+                    session
+                        .uid_store(&uid_set, "+FLAGS.SILENT (\\Deleted)")
+                        .await
+                        .map_err(imap_protocol_error)?
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .map_err(imap_protocol_error)?;
+                    if capabilities.has_str("UIDPLUS") {
+                        session
+                            .uid_expunge(&uid_set)
+                            .await
+                            .map_err(imap_protocol_error)?
+                            .try_collect::<Vec<_>>()
+                            .await
+                            .map_err(imap_protocol_error)?;
+                    }
+                    Ok(())
+                })
                 .await
-                .map_err(imap_protocol_error)?;
-            session
-                .uid_store(&uid_set, "+FLAGS.SILENT (\\Deleted)")
-                .await
-                .map_err(imap_protocol_error)?
-                .try_collect::<Vec<_>>()
-                .await
-                .map_err(imap_protocol_error)?;
-            if capabilities.has_str("UIDPLUS") {
-                session
-                    .uid_expunge(&uid_set)
-                    .await
-                    .map_err(imap_protocol_error)?
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(imap_protocol_error)?;
-            }
-            Ok(())
+                .map_err(|_| ImapError::CommandTimeout)?
+            })
         })
         .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                *guard = None;
-                Err(ImapError::CommandTimeout)
-            }
-        }
     }
 
     async fn idle(
@@ -1149,8 +1254,31 @@ fn parse_summary_headers(raw: &[u8]) -> SummaryHeaders {
     }
 }
 
-fn imap_protocol_error(error: impl fmt::Display) -> ImapError {
-    ImapError::Protocol(error.to_string())
+fn imap_connection_failed(error: &async_imap::error::Error) -> bool {
+    matches!(
+        error,
+        async_imap::error::Error::Io(_)
+            | async_imap::error::Error::ConnectionLost
+            | async_imap::error::Error::Parse(_)
+    )
+}
+
+fn imap_protocol_error(error: async_imap::error::Error) -> ImapError {
+    let reason = error.to_string();
+    if imap_connection_failed(&error) {
+        ImapError::Connection(reason)
+    } else {
+        ImapError::Protocol(reason)
+    }
+}
+
+fn imap_authentication_error(error: async_imap::error::Error) -> ImapError {
+    let reason = error.to_string();
+    if imap_connection_failed(&error) {
+        ImapError::Connection(reason)
+    } else {
+        ImapError::Authentication
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2354,6 +2482,8 @@ pub(crate) enum ImapError {
     InvalidStableId,
     #[error("invalid IMAP UID cursor")]
     InvalidCursor,
+    #[error("IMAP connection failure: {0}")]
+    Connection(String),
     #[error("IMAP protocol failure: {0}")]
     Protocol(String),
     #[error("IMAP command timed out")]
@@ -2381,6 +2511,84 @@ mod tests {
         assert!(capabilities.contains("idle"));
         assert!(capabilities.contains("UIDPLUS"));
         assert!(capabilities.contains("esearch"));
+    }
+
+    #[test]
+    fn stale_read_sessions_reconnect_once_then_surface_the_error() {
+        let broken_pipe = ImapError::Connection("io: Broken pipe (os error 32)".into());
+        assert_eq!(
+            session_error_action(&broken_pipe, true, false),
+            SessionErrorAction::InvalidateAndRetry
+        );
+        assert_eq!(
+            session_error_action(&broken_pipe, true, true),
+            SessionErrorAction::InvalidateAndReturn
+        );
+        assert_eq!(
+            session_error_action(&ImapError::CommandTimeout, true, false),
+            SessionErrorAction::InvalidateAndRetry
+        );
+    }
+
+    #[test]
+    fn stale_mutating_sessions_are_invalidated_without_replay() {
+        let broken_pipe = ImapError::Connection("io: Broken pipe (os error 32)".into());
+        assert_eq!(
+            session_error_action(&broken_pipe, false, false),
+            SessionErrorAction::InvalidateAndReturn
+        );
+        assert_eq!(
+            session_error_action(&ImapError::CommandTimeout, false, false),
+            SessionErrorAction::InvalidateAndReturn
+        );
+    }
+
+    #[test]
+    fn semantic_imap_failures_do_not_discard_a_healthy_connection() {
+        let error = imap_protocol_error(async_imap::error::Error::No("mailbox denied".into()));
+        assert!(matches!(error, ImapError::Protocol(_)));
+        assert_eq!(
+            session_error_action(&error, true, false),
+            SessionErrorAction::Return
+        );
+    }
+
+    #[test]
+    fn async_imap_transport_failures_are_marked_as_stale() {
+        let io_error = imap_protocol_error(async_imap::error::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        )));
+        let lost = imap_protocol_error(async_imap::error::Error::ConnectionLost);
+        assert!(matches!(io_error, ImapError::Connection(_)));
+        assert!(matches!(lost, ImapError::Connection(_)));
+    }
+
+    #[test]
+    fn authentication_handshake_transport_failures_are_retryable_connections() {
+        let io_error = imap_authentication_error(async_imap::error::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"),
+        ));
+        let lost = imap_authentication_error(async_imap::error::Error::ConnectionLost);
+
+        assert!(matches!(io_error, ImapError::Connection(_)));
+        assert!(matches!(lost, ImapError::Connection(_)));
+        assert_eq!(
+            session_error_action(&io_error, true, false),
+            SessionErrorAction::InvalidateAndRetry
+        );
+    }
+
+    #[test]
+    fn semantic_authentication_rejection_is_not_retried() {
+        let rejected =
+            imap_authentication_error(async_imap::error::Error::No("invalid credentials".into()));
+
+        assert!(matches!(rejected, ImapError::Authentication));
+        assert_eq!(
+            session_error_action(&rejected, true, false),
+            SessionErrorAction::Return
+        );
     }
 
     #[test]
@@ -2728,7 +2936,7 @@ mod tests {
             client
                 .read_exact(&mut byte)
                 .await
-                .map_err(imap_protocol_error)?;
+                .map_err(|error| ImapError::Connection(error.to_string()))?;
             Ok(())
         })
         .await;

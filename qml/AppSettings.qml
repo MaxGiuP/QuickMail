@@ -9,6 +9,9 @@ Singleton {
 
     property alias allowRemoteContent: settingsAdapter.allowRemoteContent
     readonly property bool ready: internal.ready
+    // Loading a persisted opt-out is asynchronous. Keep every network-backed
+    // renderer fail-closed until that choice is known.
+    readonly property bool effectiveAllowRemoteContent: ready && allowRemoteContent
     readonly property string configHome: {
         const configured = String(Quickshell.env("XDG_CONFIG_HOME") || "")
         if (configured !== "") return configured

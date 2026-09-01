@@ -117,6 +117,45 @@ cat >"$command_dir/qs" <<'EOF'
 if [ "${QUICKMAIL_TEST_QS_IPC_FAIL:-0}" = 1 ] && [ "${1:-}" = ipc ]; then
     exit 1
 fi
+if [ "${1:-}" = list ] && [ -n "${QUICKMAIL_TEST_QS_INSTANCE_PID:-}" ]; then
+    printf 'Instance test:\n  Process ID: %s\n' "$QUICKMAIL_TEST_QS_INSTANCE_PID"
+    exit 0
+fi
+if [ "${1:-}" = kill ] && [ -n "${QUICKMAIL_TEST_QS_INSTANCE_PID:-}" ]; then
+    if [ -n "${QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER:-}" ] \
+        && [ ! -e "$QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER" ]; then
+        printf 'LEGACY_KILLED_EARLY\n' >>"$QUICKMAIL_TEST_QS_LOG"
+    fi
+    (
+        sleep "${QUICKMAIL_TEST_QS_KILL_DELAY:-0}"
+        kill "$QUICKMAIL_TEST_QS_INSTANCE_PID" 2>/dev/null || true
+    ) >/dev/null 2>&1 &
+    exit 0
+fi
+if [ "${1:-}" = --no-duplicate ] \
+    && [ -n "${QUICKMAIL_TEST_QS_INSTANCE_PID:-}" ] \
+    && kill -0 "$QUICKMAIL_TEST_QS_INSTANCE_PID" 2>/dev/null; then
+    printf 'DUPLICATE_LOCKED\n' >>"$QUICKMAIL_TEST_QS_LOG"
+    exit 73
+fi
+if [ "${1:-}" = ipc ] && [ "${4:-}" = prop ] \
+    && [ "${5:-}" = get ] && [ "${7:-}" = windowMapped ]; then
+    printf '%s\n' "${QUICKMAIL_TEST_WINDOW_MAPPED:-true}"
+fi
+if [ "${1:-}" = ipc ] && [ "${4:-}" = prop ] \
+    && [ "${5:-}" = get ] && [ "${7:-}" = safeToReplace ]; then
+    if [ "${QUICKMAIL_TEST_SAFE_PROPERTY_MISSING:-0}" = 1 ]; then
+        if [ -n "${QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER:-}" ]; then
+            (
+                sleep "${QUICKMAIL_TEST_LEGACY_AUTOSAVE_DELAY:-1.6}"
+                : >"$QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER"
+            ) >/dev/null 2>&1 &
+        fi
+        printf 'Property not found.\n'
+        exit 0
+    fi
+    printf '%s\n' "${QUICKMAIL_TEST_SAFE_TO_REPLACE:-true}"
+fi
 exit 0
 EOF
 cat >"$command_dir/quickmaild" <<'EOF'
@@ -184,6 +223,49 @@ QUICKMAIL_TEST_QS_LOG=$accounts_log \
     "$project_dir/packaging/quickmail" --accounts
 grep -Fx accounts "$accounts_log" >/dev/null \
     || fail "running-client accounts IPC was not attempted"
+
+stale_log=$test_root/qs-stale-window.log
+sleep 10 &
+stale_instance_pid=$!
+PATH=$command_dir:/usr/bin:/bin \
+HOME=$test_root/home \
+XDG_RUNTIME_DIR=$runtime \
+QUICKMAIL_QML_DIR=$qml \
+QUICKMAIL_TEST_QS_LOG=$stale_log \
+QUICKMAIL_TEST_WINDOW_MAPPED=false \
+QUICKMAIL_TEST_QS_INSTANCE_PID=$stale_instance_pid \
+QUICKMAIL_TEST_QS_KILL_DELAY=0.15 \
+    "$project_dir/packaging/quickmail"
+grep -Fx kill "$stale_log" >/dev/null \
+    || fail "a windowless running instance was not stopped"
+grep -Fx -- --no-duplicate "$stale_log" >/dev/null \
+    || fail "a replacement UI was not launched after stale IPC success"
+if grep -Fx DUPLICATE_LOCKED "$stale_log" >/dev/null; then
+    fail "the replacement raced the stale process/config lock"
+fi
+
+legacy_stale_log=$test_root/qs-legacy-stale-window.log
+legacy_autosave_marker=$test_root/legacy-autosave-complete
+sleep 10 &
+legacy_stale_instance_pid=$!
+PATH=$command_dir:/usr/bin:/bin \
+HOME=$test_root/home \
+XDG_RUNTIME_DIR=$runtime \
+QUICKMAIL_QML_DIR=$qml \
+QUICKMAIL_TEST_QS_LOG=$legacy_stale_log \
+QUICKMAIL_TEST_WINDOW_MAPPED=false \
+QUICKMAIL_TEST_QS_INSTANCE_PID=$legacy_stale_instance_pid \
+QUICKMAIL_TEST_SAFE_PROPERTY_MISSING=1 \
+QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER=$legacy_autosave_marker \
+QUICKMAIL_TEST_LEGACY_AUTOSAVE_DELAY=1.6 \
+    "$project_dir/packaging/quickmail"
+grep -Fx kill "$legacy_stale_log" >/dev/null \
+    || fail "a legacy windowless instance was not stopped after its autosave grace"
+[ -e "$legacy_autosave_marker" ] \
+    || fail "the launcher did not wait for the legacy autosave grace"
+if grep -Fx LEGACY_KILLED_EARLY "$legacy_stale_log" >/dev/null; then
+    fail "a legacy UI was killed before its asynchronous autosave grace"
+fi
 
 accounts_log=$test_root/qs-accounts-startup.log
 PATH=$command_dir:/usr/bin:/bin \

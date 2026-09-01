@@ -12,6 +12,8 @@ Rectangle {
     property bool saving: false
     property bool saveQueued: false
     property bool closeAfterSave: false
+    property bool closeAfterSend: false
+    property bool closeAfterDiscard: false
     property bool sendAfterSave: false
     property bool discarding: false
     property bool loadingDraft: false
@@ -19,8 +21,11 @@ Rectangle {
     property bool replacementQueued: false
     property string replacementMode: ""
     property var replacementMessage: null
+    property string deferredMailtoUri: ""
     property int editRevision: 0
+    property int persistedRevision: -1
     property string statusText: ""
+    signal closeOperationFailed()
     readonly property int headerHeight: 48
     readonly property string modeTitle: store.composeDraft.mode === "reply" ? "Reply"
         : store.composeDraft.mode === "reply_all" ? "Reply all"
@@ -28,6 +33,16 @@ Rectangle {
         : store.composeDraft.mode === "draft" ? "Edit draft" : "New message"
     readonly property string tabTitle: minimized && subjectField.text.trim() !== ""
         ? subjectField.text.trim() : modeTitle
+    readonly property string recipientText: toField.text
+    readonly property string subjectText: subjectField.text
+    readonly property string editorBodyText: bodyField.text
+    readonly property bool transitionQueued: replacementQueued
+        || deferredMailtoUri !== ""
+    readonly property bool safeToReplace: !transitionQueued && (!open
+        || (!saving && !sending && !discarding
+        && (persistedRevision === editRevision
+            || (!hasDraftContent(draftPayload())
+                && String(store.composeDraft.draftId || "") === ""))))
 
     color: Theme.surfaceRaised
     radius: Theme.radius
@@ -98,13 +113,18 @@ Rectangle {
     }
 
     function prepareOpen() {
+        autosave.stop()
         minimized = false
         saving = false
         saveQueued = false
         closeAfterSave = false
+        closeAfterSend = false
+        closeAfterDiscard = false
         sendAfterSave = false
+        sending = false
         discarding = false
         editRevision = 0
+        persistedRevision = String(store.composeDraft.draftId || "") !== "" ? 0 : -1
         statusText = ""
         loadDraftFields()
         Qt.callLater(focusComposer)
@@ -126,34 +146,75 @@ Rectangle {
     function finishReplacement() {
         const mode = replacementMode
         const message = replacementMessage
-        replacementQueued = false
-        replacementMode = ""
-        replacementMessage = null
-        store.startCompose(mode, message)
+        clearReplacement()
+        if (mode === "mailto") {
+            applyMailto(String(message || ""))
+            return
+        } else {
+            store.startCompose(mode, message)
+        }
         // `open` remains true while switching between the saved draft and the
-        // new reply, so explicitly reload the editor fields.
+        // new reply/mailto draft, so explicitly reload the editor fields.
         prepareOpen()
     }
 
-    function startAnother(mode, message) {
+    function applyMailto(uri) {
+        if (!store.composeMailto(String(uri || ""))) {
+            statusText = "This email link could not be opened"
+            return false
+        }
+        // `open` can remain true when replacing a draft, so do not rely only
+        // on onOpenChanged to refresh the editor controls.
+        prepareOpen()
+        return true
+    }
+
+    function clearReplacement() {
+        replacementQueued = false
+        replacementMode = ""
+        replacementMessage = null
+    }
+
+    function clearAllReplacements() {
+        clearReplacement()
+        deferredMailtoUri = ""
+    }
+
+    function applyDeferredMailto() {
+        const uri = deferredMailtoUri
+        if (uri === "") return false
+        deferredMailtoUri = ""
+        return applyMailto(uri)
+    }
+
+    function continueDeferredMailto() {
+        const uri = deferredMailtoUri
+        if (uri === "") return false
+        deferredMailtoUri = ""
+        return queueReplacement("mailto", uri)
+    }
+
+    function queueReplacement(mode, message) {
         if (!open) {
+            if (mode === "mailto") return store.composeMailto(String(message || ""))
             store.startCompose(mode, message)
-            return
+            return true
         }
         restore()
-        if (sending || discarding) {
+        if (sending || discarding || closeAfterSave
+                || closeAfterSend || closeAfterDiscard) {
             statusText = "Finish the current draft first"
-            return
+            return false
         }
         replacementQueued = true
         replacementMode = String(mode || "compose")
-        replacementMessage = message || null
+        replacementMessage = message === undefined ? null : message
         autosave.stop()
         const payload = captureDraft()
         const hasSavedDraft = String(store.composeDraft.draftId || "") !== ""
         if (!hasDraftContent(payload) && !hasSavedDraft) {
             finishReplacement()
-            return
+            return true
         }
         if (saving) {
             // The in-flight request may represent an older edit revision.
@@ -161,9 +222,34 @@ Rectangle {
             // this tab, even when no text-change signal raced with us.
             saveQueued = true
             statusText = "Saving current draft…"
-            return
+            return true
         }
         save(false)
+        return true
+    }
+
+    function startAnother(mode, message) {
+        return queueReplacement(String(mode || "compose"), message || null)
+    }
+
+    function acceptsMailto(uri) {
+        const text = String(uri || "")
+        return /^mailto:/i.test(text) && text.length <= 262144
+    }
+
+    function startMailto(uri) {
+        const text = String(uri || "")
+        if (!acceptsMailto(text)) return false
+        if (sending || discarding) {
+            // Sending and deleting are already provider-visible operations and
+            // cannot be cancelled safely. Keep the URI until their callback,
+            // then open it without losing either request.
+            deferredMailtoUri = text
+            statusText = sending ? "Opening email link after send…"
+                : "Opening email link after discard…"
+            return true
+        }
+        return queueReplacement("mailto", text)
     }
 
     function toggleMinimized() {
@@ -206,22 +292,32 @@ Rectangle {
         store.saveDraft(payload, function(result, error) {
             root.saving = false
             if (error) {
+                const closingWindow = root.closeAfterSave || root.closeAfterSend
+                const failedMailto = root.replacementQueued
+                    && root.replacementMode === "mailto"
+                    ? String(root.replacementMessage || "") : ""
                 root.saveQueued = false
                 root.closeAfterSave = false
+                root.closeAfterSend = false
                 root.sendAfterSave = false
                 root.sending = false
-                root.replacementQueued = false
-                root.replacementMode = ""
-                root.replacementMessage = null
+                root.clearReplacement()
+                if (failedMailto !== "") root.deferredMailtoUri = failedMailto
                 if (root.discarding) {
                     root.saving = false
                     root.finishDiscard()
                     return
                 }
                 root.statusText = error.message || "Draft could not be saved"
+                if (failedMailto !== "")
+                    root.statusText += "; the email link remains queued"
+                if (closingWindow) root.closeOperationFailed()
+                if (root.deferredMailtoUri !== "" && !closingWindow)
+                    autosave.restart()
                 return
             }
             root.statusText = "Draft saved"
+            root.persistedRevision = savedRevision
             if (root.discarding) {
                 root.finishDiscard()
             } else if (root.replacementQueued
@@ -237,6 +333,8 @@ Rectangle {
             } else if (root.saveQueued || root.editRevision !== savedRevision) {
                 root.saveQueued = false
                 root.save(root.closeAfterSave)
+            } else if (root.deferredMailtoUri !== "") {
+                root.applyDeferredMailto()
             } else if (root.closeAfterSave) {
                 root.closeAfterSave = false
                 root.store.closeCompose()
@@ -246,7 +344,25 @@ Rectangle {
 
     function requestClose() {
         autosave.stop()
+        // Closing has priority over a queued reply/forward/mailto transition.
+        // The current draft is the state that must be persisted before exit.
+        clearAllReplacements()
+        if (discarding) {
+            closeAfterDiscard = true
+            statusText = "Discarding draft…"
+            return
+        }
+        if (sending) {
+            closeAfterSend = true
+            return
+        }
         save(true)
+    }
+
+    function cancelCloseRequest() {
+        closeAfterSave = false
+        closeAfterSend = false
+        closeAfterDiscard = false
     }
 
     function finishDiscard() {
@@ -260,7 +376,16 @@ Rectangle {
         store.deleteDraft({ draftId: id }, function(result, error) {
             root.discarding = false
             if (error) {
+                const closingWindow = root.closeAfterDiscard
+                root.closeAfterDiscard = false
                 root.statusText = error.message || "Draft could not be discarded"
+                if (closingWindow) root.closeOperationFailed()
+                if (root.deferredMailtoUri !== "") root.continueDeferredMailto()
+                return
+            }
+            root.closeAfterDiscard = false
+            if (root.deferredMailtoUri !== "") {
+                root.applyDeferredMailto()
                 return
             }
             root.store.closeCompose()
@@ -268,10 +393,13 @@ Rectangle {
     }
 
     function discard() {
+        if (discarding || sending) return
         autosave.stop()
         saveQueued = false
         closeAfterSave = false
+        closeAfterSend = false
         sendAfterSave = false
+        clearAllReplacements()
         discarding = true
         if (saving) {
             statusText = "Discarding draft…"
@@ -281,7 +409,9 @@ Rectangle {
     }
 
     function send() {
-        if (sending || toField.text.trim() === "") return
+        if (sending || discarding || transitionQueued || closeAfterSave
+                || closeAfterSend || closeAfterDiscard
+                || toField.text.trim() === "") return
         autosave.stop()
         captureDraft()
         if (saving) {
@@ -299,7 +429,16 @@ Rectangle {
         statusText = "Sending…"
         store.sendMessage(payload, function(result, error) {
             root.sending = false
-            if (error) root.statusText = error.message || "Message could not be sent"
+            if (error) {
+                const closingWindow = root.closeAfterSend
+                root.closeAfterSend = false
+                root.statusText = error.message || "Message could not be sent"
+                if (closingWindow) root.closeOperationFailed()
+                if (root.deferredMailtoUri !== "") root.continueDeferredMailto()
+                return
+            }
+            root.closeAfterSend = false
+            if (root.deferredMailtoUri !== "") root.continueDeferredMailto()
         })
     }
 
@@ -592,7 +731,10 @@ Rectangle {
             PrimaryButton {
                 text: root.sending ? "Sending…" : "Send"
                 iconName: "send"
-                enabled: !root.sending && store.accounts.length > 0
+                enabled: !root.sending && !root.discarding
+                    && !root.transitionQueued && !root.closeAfterSave
+                    && !root.closeAfterSend && !root.closeAfterDiscard
+                    && store.accounts.length > 0
                     && toField.text.trim() !== ""
                 onClicked: root.send()
             }
@@ -612,6 +754,7 @@ Rectangle {
                 iconName: "trash"
                 tip: "Discard draft"
                 destructive: true
+                enabled: !root.discarding && !root.sending
                 onClicked: root.discard()
             }
         }
@@ -635,11 +778,12 @@ Rectangle {
             autosave.stop()
             saveQueued = false
             closeAfterSave = false
+            closeAfterSend = false
+            closeAfterDiscard = false
             sendAfterSave = false
+            sending = false
             discarding = false
-            replacementQueued = false
-            replacementMode = ""
-            replacementMessage = null
+            clearReplacement()
         }
     }
 

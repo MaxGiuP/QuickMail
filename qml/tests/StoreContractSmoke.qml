@@ -21,10 +21,14 @@ Item {
         property bool connected: true
         property var requests: []
         property bool delayMail: false
+        property bool delayThread: false
+        property bool delayActions: false
         property bool syncFailure: false
         property var threadResult: null
         property var mailDetail: null
         property var delayedMail: []
+        property var delayedThreads: []
+        property var delayedActions: []
         property var snapshotResult: ({})
         property var methods: ({
             snapshot: "dashboard.snapshot",
@@ -79,10 +83,19 @@ Item {
                 delayedMail = pending
             } else if (method === methods.mailList)
                 callback({ messages: [], nextCursor: null }, null)
-            else if (method === methods.threadGet)
+            else if (method === methods.threadGet && delayThread) {
+                const pending = delayedThreads.slice()
+                pending.push({ params: params, callback: callback })
+                delayedThreads = pending
+            } else if (method === methods.threadGet)
                 callback(threadResult || ({ messages: [], truncated: false }), null)
             else if (method === methods.mailGet)
                 callback(mailDetail || ({}), null)
+            else if (method === methods.mailAction && delayActions) {
+                const pending = delayedActions.slice()
+                pending.push({ params: params, callback: callback })
+                delayedActions = pending
+            }
             else if (method === methods.draftSave)
                 callback({ draft: { draftId: "draft-returned" }, revision: 2 }, null)
             else if (method === methods.draftList)
@@ -232,6 +245,41 @@ Item {
                 && request.params.message_ids === undefined,
                 "mail.action did not use the camelCase wire contract")
 
+            // A slow conversation lookup and an in-flight provider mutation
+            // must not keep an already-cached body behind the reader spinner.
+            const cachedUnread = {
+                id: "account-a:cached-unread", accountId: "account-a",
+                mailboxId: "inbox", threadId: "account-a:cached-thread",
+                subject: "Cached reader", read: false, snippet: "Cached summary"
+            }
+            const readerRequestStart = fakeRpc.requests.length
+            fakeRpc.delayThread = true
+            fakeRpc.delayActions = true
+            fakeRpc.delayedThreads = []
+            fakeRpc.delayedActions = []
+            fakeRpc.mailDetail = Object.assign({}, cachedUnread, {
+                bodyText: "Cached body is immediately available"
+            })
+            store.messages = [cachedUnread]
+            store.openMessage(cachedUnread)
+            root.expect(!store.readerLoading
+                && store.selectedMessage.bodyText === "Cached body is immediately available",
+                "thread or mark-read work blocked a cached reader body")
+            root.expect(store.threadLoading && fakeRpc.delayedThreads.length === 1
+                && fakeRpc.delayedActions.length === 1,
+                "reader blocking fixture did not leave thread and action work pending")
+            root.expect(fakeRpc.requests.length === readerRequestStart + 3
+                && fakeRpc.requests[readerRequestStart].method === fakeRpc.methods.mailGet
+                && fakeRpc.requests[readerRequestStart + 1].method === fakeRpc.methods.threadGet
+                && fakeRpc.requests[readerRequestStart + 2].method === fakeRpc.methods.mailAction,
+                "cached body was not prioritized ahead of thread and provider work")
+            fakeRpc.delayedThreads[0].callback({
+                id: "account-a:cached-thread", messages: [cachedUnread], truncated: false
+            }, null)
+            fakeRpc.delayedActions[0].callback({}, null)
+            fakeRpc.delayThread = false
+            fakeRpc.delayActions = false
+
             const threadFirst = {
                 id: "account-a:message-1", accountId: "account-a",
                 mailboxId: "inbox",
@@ -264,8 +312,14 @@ Item {
             root.expect(store.threadMessages.length === 3
                 && store.activeThreadId === "account-a:thread-1",
                 "thread.get did not populate the chronological conversation")
-            request = fakeRpc.requests[fakeRpc.requests.length - 2]
-            root.expect(request.method === fakeRpc.methods.threadGet
+            request = null
+            for (let i = fakeRpc.requests.length - 1; i >= 0; --i) {
+                if (fakeRpc.requests[i].method === fakeRpc.methods.threadGet) {
+                    request = fakeRpc.requests[i]
+                    break
+                }
+            }
+            root.expect(request && request.method === fakeRpc.methods.threadGet
                 && request.params.messageId === "account-a:message-2",
                 "opening a conversation did not request its thread")
             fakeRpc.mailDetail = Object.assign({}, threadFirst, { bodyText: "First body" })
@@ -395,6 +449,8 @@ Item {
                 "sync callback error left the activity state stuck")
             fakeRpc.syncFailure = false
             store.syncAccount("account-b")
+            root.expect(store.errorText === "",
+                "a successful retry left the previous sync error visible")
             request = fakeRpc.requests[fakeRpc.requests.length - 1]
             root.expect(request.method === fakeRpc.methods.syncStart
                 && request.params.accountId === "account-b",

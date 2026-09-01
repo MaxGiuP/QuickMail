@@ -437,8 +437,14 @@ QtObject {
         threadMessages = [message]
         threadTruncated = false
         const conversationGeneration = ++threadGeneration
+        const shouldMarkRead = isUnread(message)
+        // Queue the cached message body and conversation lookup before the
+        // provider mutation. Even though JSON-RPC responses are correlated by
+        // ID, this ordering also keeps the reader responsive with older or
+        // strictly serial daemon implementations.
+        openThreadMessage(message, true)
         loadThread(id, conversationGeneration, requestedAccountId)
-        openThreadMessage(message)
+        if (shouldMarkRead) markRead(message, true)
     }
 
     function loadThread(messageIdValue, generation, requestedAccountId) {
@@ -463,15 +469,14 @@ QtObject {
         })
     }
 
-    function openThreadMessage(message) {
+    function openThreadMessage(message, deferReadMutation) {
         const id = messageId(message)
         const requestedAccountId = activeAccountId
         if (id === "" || !belongsToAccount(message, requestedAccountId)) return
+        const shouldMarkRead = isUnread(message)
         const generation = ++readerGeneration
         selectedMessage = message
         readerLoading = true
-        if (isUnread(message))
-            markRead(message, true)
         rpc.request(rpc.methods.mailGet, {
             messageId: id
         }, function(result, error) {
@@ -505,8 +510,10 @@ QtObject {
                             addActionId(root.messageId(member))
                     }
                     addActionId(id)
+                    const readState = shouldMarkRead
+                        ? { unread: false, is_read: true, read: true } : ({})
                     const conversationDetail = Object.assign({}, detail,
-                        { conversationMessageIds: actionIds })
+                        { conversationMessageIds: actionIds }, readState)
                     root.selectedMessage = conversationDetail
                     root.patchThreadMessage(id, conversationDetail)
                     const detailThread = root.threadKey(conversationDetail)
@@ -518,6 +525,8 @@ QtObject {
                 }
             }
         })
+        if (shouldMarkRead && deferReadMutation !== true)
+            markRead(message, true)
     }
 
     function patchThreadMessage(id, changes) {
@@ -628,6 +637,9 @@ QtObject {
             return
         }
         const requestedAccountId = String(accountIdOverride || "")
+        // A new attempt supersedes the previous synchronization error. If it
+        // fails, the callback/event below will replace this with the new cause.
+        errorText = ""
         syncing = true
         rpc.requestConnected(rpc.methods.syncStart,
             { accountId: requestedAccountId || null }, function(result, error) {

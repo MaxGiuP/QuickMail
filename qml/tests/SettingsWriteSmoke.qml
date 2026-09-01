@@ -10,6 +10,11 @@ Item {
         Qt.exit(1)
     }
 
+    Component.onCompleted: {
+        if (!AppSettings.ready && AppSettings.effectiveAllowRemoteContent)
+            root.fail("remote content was enabled before persisted settings were ready")
+    }
+
     Timer {
         interval: 20
         running: true

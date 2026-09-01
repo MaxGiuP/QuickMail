@@ -4,3 +4,4 @@ singleton AppSettings 1.0 AppSettings.qml
 RpcClient 1.0 RpcClient.qml
 MailStore 1.0 MailStore.qml
 MainWindow 1.0 MainWindow.qml
+WindowLifecycle 1.0 WindowLifecycle.qml
