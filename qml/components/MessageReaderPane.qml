@@ -512,10 +512,11 @@ Rectangle {
                         HtmlMessageView {
                             html: root.bodyHtml
                             trustedSanitizedHtml: true
-                            foregroundColor: "#202124"
-                            mutedColor: "#6b7280"
-                            linkColor: "#2563eb"
-                            pageColor: "#ffffff"
+                            useThemeColors: true
+                            foregroundColor: Theme.text
+                            mutedColor: Theme.textMuted
+                            linkColor: Theme.accent
+                            pageColor: Theme.surface
                             allowRemoteContent: AppSettings.effectiveAllowRemoteContent
                             onHtmlChanged: htmlLoader.loadedHtml = html
                             Component.onCompleted: htmlLoader.loadedHtml = html

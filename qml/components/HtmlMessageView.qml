@@ -7,6 +7,10 @@ Item {
     property string html: ""
     property bool allowRemoteContent: true
     property bool trustedSanitizedHtml: false
+    // Theme-aware rendering intentionally normalizes every authored text and
+    // fill color. Keeping both sides of each pair under one palette prevents
+    // dark text on a dark canvas and light text on a light canvas.
+    property bool useThemeColors: true
     property color foregroundColor: "#202124"
     property color mutedColor: "#6b7280"
     property color linkColor: "#2563eb"
@@ -96,8 +100,16 @@ Item {
     })
     readonly property string safeNamedColors: "aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray grey green greenyellow honeydew hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato transparent turquoise violet wheat white whitesmoke yellow yellowgreen"
     readonly property string renderedHtml: documentForMessage()
-    readonly property color effectivePageColor: opaqueCanvasColor(messageBackgroundColor())
-    readonly property color effectiveForegroundColor: messageForegroundColor()
+    readonly property color effectivePageColor: opaqueCanvasColor(
+        useThemeColors ? pageColor : messageBackgroundColor())
+    readonly property color effectiveForegroundColor: useThemeColors
+        ? readableTextColor(foregroundColor, effectivePageColor)
+        : messageForegroundColor()
+    readonly property color effectiveLinkColor: useThemeColors
+        ? readableAccentColor(linkColor, effectivePageColor,
+            effectiveForegroundColor) : linkColor
+    readonly property string effectiveColorScheme: isDarkColor(effectivePageColor)
+        ? "dark" : "light"
     readonly property real rendererHeight: Math.max(160, nativeRenderer.contentHeight + 8)
     readonly property real renderedContentWidth: Math.max(width, nativeRenderer.contentWidth)
     readonly property bool hasHorizontalOverflow: nativeRenderer.contentWidth > width + 1
@@ -126,6 +138,53 @@ Item {
         }
         const text = String(value || "")
         return /^#[0-9a-f]{3,8}$/i.test(text) ? text : "#000000"
+    }
+
+    function isDarkColor(value) {
+        if (!value || value.r === undefined) return false
+        // Perceived luminance is sufficient here: CSS color-scheme only needs
+        // the palette direction, while the actual colors are injected below.
+        return Number(value.r) * 0.2126 + Number(value.g) * 0.7152
+            + Number(value.b) * 0.0722 < 0.5
+    }
+
+    function paintedColor(value, canvas) {
+        if (!value || value.r === undefined) return canvas
+        const alpha = Math.max(0, Math.min(1, Number(value.a)))
+        return Qt.rgba(Number(value.r) * alpha + Number(canvas.r) * (1 - alpha),
+            Number(value.g) * alpha + Number(canvas.g) * (1 - alpha),
+            Number(value.b) * alpha + Number(canvas.b) * (1 - alpha), 1)
+    }
+
+    function relativeLuminance(value) {
+        function linear(component) {
+            const channel = Math.max(0, Math.min(1, Number(component)))
+            return channel <= 0.04045 ? channel / 12.92
+                : Math.pow((channel + 0.055) / 1.055, 2.4)
+        }
+        return linear(value.r) * 0.2126 + linear(value.g) * 0.7152
+            + linear(value.b) * 0.0722
+    }
+
+    function contrastRatio(first, second) {
+        const firstLuminance = relativeLuminance(first)
+        const secondLuminance = relativeLuminance(second)
+        return (Math.max(firstLuminance, secondLuminance) + 0.05)
+            / (Math.min(firstLuminance, secondLuminance) + 0.05)
+    }
+
+    function readableTextColor(preferred, canvas) {
+        const painted = paintedColor(preferred, canvas)
+        if (contrastRatio(painted, canvas) >= 4.5) return preferred
+        const dark = Qt.rgba(0, 0, 0, 1)
+        const light = Qt.rgba(1, 1, 1, 1)
+        return contrastRatio(light, canvas) >= contrastRatio(dark, canvas)
+            ? light : dark
+    }
+
+    function readableAccentColor(preferred, canvas, fallback) {
+        return contrastRatio(paintedColor(preferred, canvas), canvas) >= 4.5
+            ? preferred : fallback
     }
 
     function decodeNumericEntities(value) {
@@ -248,6 +307,58 @@ Item {
                 return rules.length > 0 ? "<style>" + rules.join("") + "</style>" : ""
             })
         return result
+    }
+
+    function declarationsWithoutMessageColors(value) {
+        const declarations = String(value || "").split(";")
+        const kept = []
+        for (let index = 0; index < declarations.length; ++index) {
+            const declaration = declarations[index].trim()
+            const colon = declaration.indexOf(":")
+            if (colon <= 0) continue
+            const property = declaration.substring(0, colon).trim().toLowerCase()
+            if (property === "background" || property === "background-color"
+                    || property === "color")
+                continue
+            kept.push(declaration)
+        }
+        return kept.join(";")
+    }
+
+    function removeMessageColors(source) {
+        // Qt rich text does not adapt authored email CSS to the application
+        // palette. Remove authored foregrounds and background fills while
+        // preserving the sender's typography and layout, then let the theme
+        // rules below cascade through every element. This also handles inline
+        // !important values.
+        let result = String(source || "").replace(
+            /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi,
+            function(_match, css) {
+                const rules = []
+                String(css || "").replace(/([^{}]+)\{([^{}]*)\}/g,
+                    function(_rule, selector, declarations) {
+                        const cleaned = declarationsWithoutMessageColors(declarations)
+                        if (String(selector || "").trim() !== "" && cleaned !== "")
+                            rules.push(String(selector).trim() + "{" + cleaned + "}")
+                        return ""
+                    })
+                return rules.length > 0 ? "<style>" + rules.join("") + "</style>" : ""
+            })
+        return result.replace(/<[a-z][a-z0-9:-]*\b[^>]*>/gi,
+            function(openingTag) {
+                let cleanedTag = String(openingTag).replace(
+                    /\s+style\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+                    function(_match, doubleQuoted, singleQuoted, bare) {
+                        const cleaned = declarationsWithoutMessageColors(
+                            doubleQuoted !== undefined ? doubleQuoted
+                                : (singleQuoted !== undefined ? singleQuoted : bare))
+                        if (cleaned === "") return ""
+                        return " style=\"" + cleaned.replace(/\"/g, "&quot;") + "\""
+                    })
+                return cleanedTag.replace(
+                    /\s+(?:alink|background|bgcolor|color|link|text|vlink)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi,
+                    "")
+            })
     }
 
     function removeExecutableMarkup(source) {
@@ -476,13 +587,15 @@ Item {
     function documentForMessage() {
         const safeMarkup = trustedSanitizedHtml
             ? String(html || "") : removeExecutableMarkup(html)
-        const source = normalizeBodyBackground(sanitizeImageSources(safeMarkup))
+        const policyMarkup = useThemeColors
+            ? removeMessageColors(safeMarkup) : normalizeBodyBackground(safeMarkup)
+        const source = sanitizeImageSources(policyMarkup)
         const baseline = "<style type=\"text/css\">"
-            + ":root{color-scheme:only light}"
+            + ":root{color-scheme:" + effectiveColorScheme + "}"
             + "body{background-color:" + cssColor(effectivePageColor)
             + ";color:" + cssColor(effectiveForegroundColor)
             + ";font-family:sans-serif;font-size:15px;line-height:1.55}"
-            + "a{color:" + cssColor(linkColor) + "}"
+            + "a{color:" + cssColor(effectiveLinkColor) + "}"
             + "blockquote{margin-left:12px;padding-left:12px;border-left:3px solid "
             + cssColor(mutedColor) + "}</style>"
         const constraints = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -556,7 +669,7 @@ Item {
             activeFocusOnPress: true
             persistentSelection: true
             color: root.effectiveForegroundColor
-            selectionColor: root.linkColor
+            selectionColor: root.effectiveLinkColor
             selectedTextColor: root.effectivePageColor
             font.family: "sans-serif"
             font.pixelSize: 15
