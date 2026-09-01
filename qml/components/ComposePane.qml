@@ -35,7 +35,9 @@ Rectangle {
         ? subjectField.text.trim() : modeTitle
     readonly property string recipientText: toField.text
     readonly property string subjectText: subjectField.text
-    readonly property string editorBodyText: bodyField.text
+    readonly property string editorBodyText: bodyField.bodyText
+    readonly property string editorBodyHtml: bodyField.bodyHtml
+    readonly property bool formattingExpanded: AppSettings.composeFormattingExpanded
     readonly property bool transitionQueued: replacementQueued
         || deferredMailtoUri !== ""
     readonly property bool safeToReplace: !transitionQueued && (!open
@@ -84,7 +86,8 @@ Rectangle {
             cc: parseAddresses(ccField.text),
             bcc: parseAddresses(bccField.text),
             subject: subjectField.text,
-            bodyText: bodyField.text,
+            bodyText: bodyField.bodyText,
+            bodyHtml: bodyField.bodyHtml === "" ? null : bodyField.bodyHtml,
             inReplyTo: store.composeDraft.inReplyTo || null
         }
     }
@@ -101,10 +104,28 @@ Rectangle {
         ccField.text = addressText(store.composeDraft.cc)
         bccField.text = addressText(store.composeDraft.bcc)
         subjectField.text = String(store.composeDraft.subject || "")
-        bodyField.text = String(store.composeDraft.bodyText || "")
+        bodyField.loadMessageBody(store.composeDraft.bodyText
+            || store.composeDraft.body_text || "", store.composeDraft.bodyHtml
+            || store.composeDraft.body_html || "")
         recipientDetailsOpen = ccField.text !== "" || bccField.text !== ""
         loadingDraft = false
     }
+
+    function selectBodyText(start, end) {
+        const first = Math.max(0, Math.min(bodyField.length, Number(start)))
+        const last = Math.max(first, Math.min(bodyField.length, Number(end)))
+        bodyField.select(first, last)
+        bodyField.forceActiveFocus()
+    }
+
+    function formatBodyBold() { return bodyField.applyBold() }
+    function formatBodyItalic() { return bodyField.applyItalic() }
+    function formatBodyUnderline() { return bodyField.applyUnderline() }
+    function formatBodyStrikeout() { return bodyField.applyStrikeout() }
+    function formatBodySize(pixelSize) { return bodyField.applyFontSize(pixelSize) }
+    function formatBodyColor(value) { return bodyField.applyTextColor(value) }
+    function highlightBody(value) { return bodyField.applyHighlight(value) }
+    function clearBodyFormatting() { return bodyField.clearSelectionFormatting() }
 
     function focusComposer() {
         if (!open || minimized) return
@@ -691,24 +712,148 @@ Rectangle {
                     color: Theme.borderSoft
                 }
 
-                TextArea {
+                Rectangle {
+                    visible: AppSettings.composeFormattingExpanded
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: visible ? 46 : 0
+                    color: Theme.surface
+
+                    Flickable {
+                        anchors.fill: parent
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        contentWidth: formatRow.implicitWidth
+                        contentHeight: height
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+
+                        RowLayout {
+                            id: formatRow
+                            height: parent.height
+                            spacing: 2
+
+                            ComposeFormatButton {
+                                label: "↶"
+                                tip: "Undo (Ctrl+Z)"
+                                enabled: bodyField.canUndo
+                                onClicked: bodyField.undo()
+                            }
+                            ComposeFormatButton {
+                                label: "↷"
+                                tip: "Redo (Ctrl+Shift+Z)"
+                                enabled: bodyField.canRedo
+                                onClicked: bodyField.redo()
+                            }
+
+                            Rectangle {
+                                Layout.preferredWidth: 1
+                                Layout.preferredHeight: 24
+                                Layout.leftMargin: 3
+                                Layout.rightMargin: 3
+                                color: Theme.borderSoft
+                            }
+
+                            ComposeFormatButton {
+                                label: "B"
+                                labelBold: true
+                                tip: "Bold (Ctrl+B)"
+                                onClicked: bodyField.applyBold()
+                            }
+                            ComposeFormatButton {
+                                label: "I"
+                                labelItalic: true
+                                tip: "Italic (Ctrl+I)"
+                                onClicked: bodyField.applyItalic()
+                            }
+                            ComposeFormatButton {
+                                label: "U"
+                                labelUnderline: true
+                                tip: "Underline (Ctrl+U)"
+                                onClicked: bodyField.applyUnderline()
+                            }
+                            ComposeFormatButton {
+                                label: "S"
+                                labelStrikeout: true
+                                tip: "Strikethrough (Ctrl+Shift+X)"
+                                onClicked: bodyField.applyStrikeout()
+                            }
+
+                            StyledComboBox {
+                                id: textSize
+                                Layout.preferredWidth: 104
+                                Layout.preferredHeight: 36
+                                model: [
+                                    { label: "Small", size: 12 },
+                                    { label: "Body", size: 14 },
+                                    { label: "Large", size: 18 },
+                                    { label: "Title", size: 24 }
+                                ]
+                                textRole: "label"
+                                currentIndex: 1
+                                Accessible.name: "Text size"
+                                onActivated: index => bodyField.applyFontSize(model[index].size)
+                            }
+
+                            ComposeFormatButton {
+                                label: "A"
+                                swatchColor: "#3b82f6"
+                                tip: "Text colour"
+                                onClicked: textColorMenu.open()
+
+                                Menu {
+                                    id: textColorMenu
+                                    y: parent.height
+                                    MenuItem { text: "Red"; onTriggered: bodyField.applyTextColor("#ef5350") }
+                                    MenuItem { text: "Orange"; onTriggered: bodyField.applyTextColor("#f59e0b") }
+                                    MenuItem { text: "Green"; onTriggered: bodyField.applyTextColor("#22c55e") }
+                                    MenuItem { text: "Blue"; onTriggered: bodyField.applyTextColor("#3b82f6") }
+                                    MenuItem { text: "Purple"; onTriggered: bodyField.applyTextColor("#a855f7") }
+                                }
+                            }
+                            ComposeFormatButton {
+                                label: "H"
+                                swatchColor: "#fff2a8"
+                                tip: "Highlight colour"
+                                onClicked: highlightMenu.open()
+
+                                Menu {
+                                    id: highlightMenu
+                                    y: parent.height
+                                    MenuItem { text: "Yellow"; onTriggered: bodyField.applyHighlight("#fff2a8") }
+                                    MenuItem { text: "Green"; onTriggered: bodyField.applyHighlight("#c8f7d5") }
+                                    MenuItem { text: "Blue"; onTriggered: bodyField.applyHighlight("#cfe8ff") }
+                                    MenuItem { text: "Pink"; onTriggered: bodyField.applyHighlight("#ffd6e7") }
+                                }
+                            }
+                            ComposeFormatButton {
+                                label: "Tx"
+                                tip: "Clear formatting from selected text"
+                                enabled: bodyField.selectionStart !== bodyField.selectionEnd
+                                onClicked: bodyField.clearSelectionFormatting()
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    visible: AppSettings.composeFormattingExpanded
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.preferredHeight: visible ? 1 : 0
+                    color: Theme.borderSoft
+                }
+
+                RichTextArea {
                     id: bodyField
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.max(180, root.height - 300)
+                    Layout.preferredHeight: Math.max(180, root.height
+                        - (AppSettings.composeFormattingExpanded ? 346 : 300))
                     Layout.leftMargin: 8
                     Layout.rightMargin: 8
                     Layout.topMargin: 6
                     placeholderText: "Write a message…"
                     placeholderTextColor: Theme.textMuted
-                    color: Theme.text
-                    selectionColor: Theme.accentSoft
-                    selectedTextColor: Theme.text
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 14
-                    wrapMode: TextEdit.Wrap
-                    selectByMouse: true
-                    background: null
-                    onTextChanged: if (activeFocus && !root.loadingDraft) root.noteEdited()
+                    onUserEdited: if (!root.loadingDraft) root.noteEdited()
                 }
             }
         }
@@ -737,6 +882,18 @@ Rectangle {
                     && store.accounts.length > 0
                     && toField.text.trim() !== ""
                 onClicked: root.send()
+            }
+            ComposeFormatButton {
+                label: "Aa"
+                labelBold: AppSettings.composeFormattingExpanded
+                swatchColor: AppSettings.composeFormattingExpanded
+                    ? Theme.accent : "transparent"
+                tip: AppSettings.composeFormattingExpanded
+                    ? "Hide formatting options" : "Show formatting options"
+                onClicked: {
+                    AppSettings.composeFormattingExpanded
+                        = !AppSettings.composeFormattingExpanded
+                }
             }
             Text {
                 visible: root.statusText !== ""
@@ -769,6 +926,26 @@ Rectangle {
 
     Shortcut { sequence: "Ctrl+Return"; enabled: root.open; onActivated: root.send() }
     Shortcut { sequence: "Ctrl+Enter"; enabled: root.open; onActivated: root.send() }
+    Shortcut {
+        sequence: "Ctrl+B"
+        enabled: root.open && !root.minimized
+        onActivated: bodyField.applyBold()
+    }
+    Shortcut {
+        sequence: "Ctrl+I"
+        enabled: root.open && !root.minimized
+        onActivated: bodyField.applyItalic()
+    }
+    Shortcut {
+        sequence: "Ctrl+U"
+        enabled: root.open && !root.minimized
+        onActivated: bodyField.applyUnderline()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+X"
+        enabled: root.open && !root.minimized
+        onActivated: bodyField.applyStrikeout()
+    }
     Shortcut { sequence: "Escape"; enabled: root.open; onActivated: root.requestClose() }
 
     onOpenChanged: {

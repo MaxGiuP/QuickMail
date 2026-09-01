@@ -8,6 +8,7 @@ Singleton {
     id: root
 
     property alias allowRemoteContent: settingsAdapter.allowRemoteContent
+    property alias composeFormattingExpanded: settingsAdapter.composeFormattingExpanded
     readonly property bool ready: internal.ready
     // Loading a persisted opt-out is asynchronous. Keep every network-backed
     // renderer fail-closed until that choice is known.
@@ -60,6 +61,9 @@ Singleton {
             // Keep the familiar mail-client behaviour by default. People who
             // prefer stricter privacy can disable it from the reader menu.
             property bool allowRemoteContent: true
+            // The composer keeps its richer controls visible by default, but
+            // the compact state is remembered when screen space matters more.
+            property bool composeFormattingExpanded: true
         }
     }
 }
