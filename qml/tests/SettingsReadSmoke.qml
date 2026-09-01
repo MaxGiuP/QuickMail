@@ -29,6 +29,14 @@ Item {
                 root.fail("compact message-list preference did not survive a new process")
                 return
             }
+            if (AppSettings.readerZoomPercent !== 130) {
+                root.fail("reader zoom did not survive a new process")
+                return
+            }
+            if (AppSettings.useThemeEmailColors !== false) {
+                root.fail("original-colour preference did not survive a new process")
+                return
+            }
             Qt.quit()
         }
     }

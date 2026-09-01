@@ -10,6 +10,8 @@ Singleton {
     property alias allowRemoteContent: settingsAdapter.allowRemoteContent
     property alias compactMessageList: settingsAdapter.compactMessageList
     property alias composeFormattingExpanded: settingsAdapter.composeFormattingExpanded
+    property alias readerZoomPercent: settingsAdapter.readerZoomPercent
+    property alias useThemeEmailColors: settingsAdapter.useThemeEmailColors
     readonly property bool ready: internal.ready
     // Loading a persisted opt-out is asynchronous. Keep every network-backed
     // renderer fail-closed until that choice is known.
@@ -39,6 +41,10 @@ Singleton {
         id: settingsFile
         path: root.settingsPath
         watchChanges: false
+        // The file is tiny. Completing each debounced write synchronously
+        // prevents an older async snapshot from overwriting rapid changes
+        // such as successive Ctrl+wheel zoom steps.
+        blockWrites: true
 
         onAdapterUpdated: {
             if (internal.ready) writeTimer.restart()
@@ -68,6 +74,12 @@ Singleton {
             // The composer keeps its richer controls visible by default, but
             // the compact state is remembered when screen space matters more.
             property bool composeFormattingExpanded: true
+            // Reader zoom is shared across messages so switching mail never
+            // unexpectedly changes the user's preferred reading size.
+            property int readerZoomPercent: 100
+            // Matching the application palette is the safe, readable default;
+            // original sender colors remain available from QuickMail settings.
+            property bool useThemeEmailColors: true
         }
     }
 }

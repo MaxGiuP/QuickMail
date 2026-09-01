@@ -16,10 +16,29 @@ Rectangle {
     property bool htmlRenderFailed: false
     property bool htmlRenderReady: false
     property int htmlRenderGeneration: 0
+    property real _zoomWheelAngleRemainder: 0
+    property real _zoomWheelPixelRemainder: 0
+    property real _pendingZoomScrollRatio: 0
+    property bool _zoomScrollRestorePending: false
+    property int _zoomScrollRestoreGeneration: 0
+    property string _displayedMessageId: ""
     readonly property bool settingsMenuVisible: readerSettings.visible
     readonly property int settingsMenuItemCount: readerSettings.count
     readonly property bool compactSettingChecked: compactMessageListSetting.checked
     readonly property bool composeFormattingSettingChecked: composeFormattingSetting.checked
+    readonly property int minimumZoomPercent: 50
+    readonly property int maximumZoomPercent: 200
+    readonly property int zoomStepPercent: 10
+    readonly property int messageZoomPercent: normalizedZoomPercent(
+        AppSettings.readerZoomPercent)
+    readonly property real messageZoomFactor: messageZoomPercent / 100
+    readonly property bool canZoomIn: messageZoomPercent < maximumZoomPercent
+    readonly property bool canZoomOut: messageZoomPercent > minimumZoomPercent
+    readonly property var readerActiveFocusItem: root.Window.window
+        ? root.Window.window.activeFocusItem : null
+    readonly property bool readerShortcutsEnabled: root.visible && root.enabled
+        && store.selectedMessage !== null && !readerSettings.visible
+        && itemBelongsToReader(readerActiveFocusItem)
     readonly property bool threadAvatarLayoutReady: _threadAvatarLayoutReady
     property bool _threadAvatarLayoutReady: false
     property int _threadAvatarLayoutGeneration: 0
@@ -38,6 +57,8 @@ Rectangle {
     readonly property string bodyText: store.messageBodyText(message)
     readonly property string bodyHtml: String(message.bodyHtml || message.body_html || "")
     readonly property bool hasHtmlBody: bodyHtml.trim() !== ""
+    readonly property bool messageIsUnread: message.unread === true
+        || message.is_read === false || message.read === false
     readonly property string renderedBodyHtml: hasHtmlBody ? htmlLoader.loadedHtml : ""
     readonly property int threadCount: Array.isArray(store.threadMessages)
         ? store.threadMessages.length : 0
@@ -78,6 +99,7 @@ Rectangle {
 
     onThreadCountChanged: deferThreadAvatarLayout()
     Component.onCompleted: {
+        _displayedMessageId = currentMessageId()
         deferThreadAvatarLayout()
         scheduleHtmlRender()
     }
@@ -93,9 +115,160 @@ Rectangle {
         return value.map(entry => entry.name || entry.address || "").filter(Boolean).join(", ")
     }
 
+    function normalizedZoomPercent(value) {
+        const requested = Number(value)
+        if (!isFinite(requested)) return 100
+        return Math.max(minimumZoomPercent, Math.min(maximumZoomPercent,
+            Math.round(requested)))
+    }
+
+    function itemBelongsToReader(item) {
+        let current = item
+        while (current !== null && current !== undefined) {
+            if (current === root) return true
+            current = current.parent
+        }
+        return false
+    }
+
+    function currentMessageId() {
+        if (store.selectedMessage === null) return ""
+        if (typeof store.messageId === "function")
+            return String(store.messageId(root.message) || "")
+        return String(root.message.id || root.message.message_id || "")
+    }
+
+    function deferZoomScrollRestore() {
+        if (!_zoomScrollRestorePending) return
+        const generation = ++_zoomScrollRestoreGeneration
+        Qt.callLater(function() {
+            Qt.callLater(function() {
+                if (generation !== root._zoomScrollRestoreGeneration
+                        || !root._zoomScrollRestorePending) return
+                root.setReaderScroll(root._pendingZoomScrollRatio
+                    * root.maximumReaderScroll())
+                root._zoomScrollRestorePending = false
+            })
+        })
+    }
+
+    function beginZoomScrollRestore() {
+        if (!_zoomScrollRestorePending) {
+            const maximum = maximumReaderScroll()
+            _pendingZoomScrollRatio = maximum > 0
+                ? Math.max(0, Math.min(1, bodyFlick.contentY / maximum)) : 0
+            _zoomScrollRestorePending = true
+        }
+        deferZoomScrollRestore()
+    }
+
     function toggleReaderSettings() {
         if (readerSettings.visible) readerSettings.close()
         else readerSettings.open()
+    }
+
+    function setMessageZoomPercent(value) {
+        const next = normalizedZoomPercent(value)
+        if (AppSettings.readerZoomPercent !== next) {
+            beginZoomScrollRestore()
+            AppSettings.readerZoomPercent = next
+        }
+    }
+
+    function adjustMessageZoom(percentagePoints) {
+        const delta = Number(percentagePoints)
+        if (!isFinite(delta) || delta === 0) return
+        setMessageZoomPercent(messageZoomPercent + delta)
+    }
+
+    function zoomIn() {
+        adjustMessageZoom(zoomStepPercent)
+    }
+
+    function zoomOut() {
+        adjustMessageZoom(-zoomStepPercent)
+    }
+
+    function resetZoom() {
+        resetZoomWheelAccumulator()
+        setMessageZoomPercent(100)
+    }
+
+    function resetZoomWheelAccumulator() {
+        zoomWheelAccumulatorReset.stop()
+        _zoomWheelAngleRemainder = 0
+        _zoomWheelPixelRemainder = 0
+    }
+
+    function wholeWheelSteps(value, threshold) {
+        const scaled = value / threshold
+        return scaled < 0 ? Math.ceil(scaled) : Math.floor(scaled)
+    }
+
+    function handleReaderZoomWheel(angleDelta, pixelDelta, modifiers) {
+        if (Number(modifiers) !== Number(Qt.ControlModifier)) return false
+        const angle = Number(angleDelta || 0)
+        const pixel = Number(pixelDelta || 0)
+        if (!isFinite(angle) || !isFinite(pixel)
+                || (angle === 0 && pixel === 0)) return false
+        zoomWheelAccumulatorReset.restart()
+
+        let steps = 0
+        if (angle !== 0) {
+            if (_zoomWheelAngleRemainder !== 0
+                    && Math.sign(_zoomWheelAngleRemainder) !== Math.sign(angle))
+                _zoomWheelAngleRemainder = 0
+            _zoomWheelAngleRemainder += angle
+            steps = wholeWheelSteps(_zoomWheelAngleRemainder, 120)
+            _zoomWheelAngleRemainder -= steps * 120
+            _zoomWheelPixelRemainder = 0
+        } else {
+            if (_zoomWheelPixelRemainder !== 0
+                    && Math.sign(_zoomWheelPixelRemainder) !== Math.sign(pixel))
+                _zoomWheelPixelRemainder = 0
+            _zoomWheelPixelRemainder += pixel
+            steps = wholeWheelSteps(_zoomWheelPixelRemainder, 40)
+            _zoomWheelPixelRemainder -= steps * 40
+            _zoomWheelAngleRemainder = 0
+        }
+        if (steps !== 0) adjustMessageZoom(steps * zoomStepPercent)
+        return true
+    }
+
+    Timer {
+        id: zoomWheelAccumulatorReset
+        interval: 400
+        repeat: false
+        onTriggered: root.resetZoomWheelAccumulator()
+    }
+
+    function maximumReaderScroll() {
+        return Math.max(0, bodyFlick.contentHeight - bodyFlick.height)
+    }
+
+    function setReaderScroll(value) {
+        bodyFlick.contentY = Math.max(0, Math.min(maximumReaderScroll(),
+            Number(value) || 0))
+        bodyFlick.returnToBounds()
+    }
+
+    function scrollReaderPage(direction) {
+        setReaderScroll(bodyFlick.contentY + Number(direction || 0)
+            * Math.max(80, bodyFlick.height * 0.85))
+    }
+
+    function scrollReaderToStart() {
+        setReaderScroll(0)
+    }
+
+    function scrollReaderToEnd() {
+        setReaderScroll(maximumReaderScroll())
+    }
+
+    function markUnread() {
+        if (store.selectedMessage !== null && !messageIsUnread
+                && typeof store.markRead === "function")
+            store.markRead(root.message, false)
     }
 
     function threadSender(item) {
@@ -236,6 +409,26 @@ Rectangle {
                 onClicked: root.backRequested()
             }
             Item { Layout.fillWidth: true }
+            Button {
+                id: zoomIndicator
+                objectName: "readerZoomIndicator"
+                visible: store.selectedMessage !== null
+                Layout.preferredWidth: 52
+                flat: true
+                text: root.messageZoomPercent + "%"
+                enabled: root.messageZoomPercent !== 100
+                font.family: Theme.fontFamily
+                font.pixelSize: 11
+                onClicked: root.resetZoom()
+                ToolTip.visible: hovered
+                ToolTip.text: AgendaTranslations.tr("Reset zoom (Ctrl+0)")
+            }
+            IconButton {
+                iconName: "unread"
+                tip: AgendaTranslations.tr("Mark as unread (Shift+U)")
+                enabled: store.selectedMessage !== null && !root.messageIsUnread
+                onClicked: root.markUnread()
+            }
             IconButton {
                 iconName: "archive"
                 tip: "Archive (E)"
@@ -260,7 +453,7 @@ Rectangle {
             IconButton {
                 objectName: "readerSettingsButton"
                 iconName: "settings"
-                tip: "QuickMail settings"
+                tip: AgendaTranslations.tr("QuickMail settings")
                 onClicked: root.toggleReaderSettings()
 
                 Menu {
@@ -272,15 +465,21 @@ Rectangle {
                         | Popup.CloseOnPressOutsideParent
                     MenuItem {
                         objectName: "remoteContentSetting"
-                        text: "Load remote content"
+                        text: AgendaTranslations.tr("Load remote content")
                         checkable: true
                         checked: AppSettings.allowRemoteContent
                         onTriggered: AppSettings.allowRemoteContent = checked
                     }
                     MenuItem {
+                        text: AgendaTranslations.tr("Always match app colours")
+                        checkable: true
+                        checked: AppSettings.useThemeEmailColors
+                        onTriggered: AppSettings.useThemeEmailColors = checked
+                    }
+                    MenuItem {
                         id: compactMessageListSetting
                         objectName: "compactMessageListSetting"
-                        text: "Compact message list"
+                        text: AgendaTranslations.tr("Compact message list")
                         checkable: true
                         checked: AppSettings.compactMessageList
                         onTriggered: AppSettings.compactMessageList = checked
@@ -288,10 +487,30 @@ Rectangle {
                     MenuItem {
                         id: composeFormattingSetting
                         objectName: "composeFormattingSetting"
-                        text: "Show compose formatting tools"
+                        text: AgendaTranslations.tr("Show compose formatting tools")
                         checkable: true
                         checked: AppSettings.composeFormattingExpanded
                         onTriggered: AppSettings.composeFormattingExpanded = checked
+                    }
+                    MenuSeparator {}
+                    MenuItem {
+                        objectName: "readerZoomInMenuItem"
+                        text: AgendaTranslations.tr("Zoom in") + "\tCtrl++"
+                        enabled: root.canZoomIn
+                        onTriggered: root.zoomIn()
+                    }
+                    MenuItem {
+                        objectName: "readerZoomOutMenuItem"
+                        text: AgendaTranslations.tr("Zoom out") + "\tCtrl+-"
+                        enabled: root.canZoomOut
+                        onTriggered: root.zoomOut()
+                    }
+                    MenuItem {
+                        objectName: "readerZoomResetMenuItem"
+                        text: AgendaTranslations.tr("Reset zoom (%1%)")
+                            .arg(root.messageZoomPercent) + "\tCtrl+0"
+                        enabled: root.messageZoomPercent !== 100
+                        onTriggered: root.resetZoom()
                     }
                 }
             }
@@ -314,6 +533,7 @@ Rectangle {
 
         Flickable {
             id: bodyFlick
+            objectName: "readerBodyFlick"
             Layout.fillWidth: true
             Layout.fillHeight: true
             visible: store.selectedMessage !== null
@@ -324,8 +544,24 @@ Rectangle {
             ScrollBar.vertical: ScrollBar {}
             onWidthChanged: root.deferThreadAvatarLayout()
 
+            WheelHandler {
+                id: readerZoomWheelHandler
+                objectName: "readerZoomWheelHandler"
+                target: null
+                orientation: Qt.Vertical
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedModifiers: Qt.ControlModifier
+                blocking: true
+                onWheel: event => {
+                    event.accepted = root.handleReaderZoomWheel(
+                        event.angleDelta.y, event.pixelDelta.y,
+                        event.modifiers)
+                }
+            }
+
             ColumnLayout {
                 id: article
+                objectName: "readerArticle"
                 width: Math.min(bodyFlick.width - 48, 780)
                 x: Math.max(24, (bodyFlick.width - width) / 2)
                 y: 24
@@ -713,25 +949,36 @@ Rectangle {
 
                 Loader {
                     id: htmlLoader
+                    objectName: "messageHtmlLoader"
                     property real renderedHeight: 160
                     property string loadedHtml: ""
                     Layout.fillWidth: true
                     Layout.preferredHeight: renderedHeight
                     visible: !store.readerLoading && root.hasHtmlBody
-                        && root.htmlRenderReady && !root.htmlRenderFailed
-                    active: root.hasHtmlBody && root.htmlRenderReady && !root.htmlRenderFailed
+                        && !root.htmlRenderFailed
+                    active: root.hasHtmlBody && root.htmlRenderReady
+                        && !root.htmlRenderFailed
                     sourceComponent: Component {
                         HtmlMessageView {
+                            objectName: "messageHtmlView"
                             html: root.bodyHtml
                             trustedSanitizedHtml: true
-                            useThemeColors: true
+                            useThemeColors: AppSettings.useThemeEmailColors
+                            zoomFactor: root.messageZoomFactor
                             foregroundColor: Theme.text
                             mutedColor: Theme.textMuted
                             linkColor: Theme.accent
                             pageColor: Theme.surface
                             allowRemoteContent: AppSettings.effectiveAllowRemoteContent
+                            onPreferredHeightChanged: preferredHeight => {
+                                htmlLoader.renderedHeight = preferredHeight
+                                root.deferZoomScrollRestore()
+                            }
                             onHtmlChanged: htmlLoader.loadedHtml = html
-                            Component.onCompleted: htmlLoader.loadedHtml = html
+                            Component.onCompleted: {
+                                htmlLoader.loadedHtml = html
+                                htmlLoader.renderedHeight = rendererHeight
+                            }
                         }
                     }
                     onStatusChanged: {
@@ -743,15 +990,14 @@ Rectangle {
                     target: htmlLoader.item
                     enabled: htmlLoader.item !== null
                     function onRenderingFailed() { root.htmlRenderFailed = true }
-                    function onPreferredHeightChanged(height) {
-                        htmlLoader.renderedHeight = height
-                    }
                     function onExternalLinkRequested(url) {
                         Qt.openUrlExternally(url)
                     }
                 }
 
                 TextArea {
+                    id: plainBody
+                    objectName: "plainMessageBody"
                     Layout.fillWidth: true
                     visible: !store.readerLoading && (!root.hasHtmlBody || root.htmlRenderFailed)
                     text: root.bodyText
@@ -763,10 +1009,11 @@ Rectangle {
                     selectionColor: Theme.accentSoft
                     selectedTextColor: Theme.text
                     font.family: Theme.fontFamily
-                    font.pixelSize: 15
+                    font.pixelSize: 15 * root.messageZoomFactor
                     background: null
                     padding: 0
                     implicitHeight: contentHeight
+                    onContentHeightChanged: root.deferZoomScrollRestore()
                 }
 
                 ColumnLayout {
@@ -902,17 +1149,65 @@ Rectangle {
         onRejected: root.pendingSaveSource = ""
     }
 
-    Shortcut { sequence: "R"; enabled: store.selectedMessage !== null; onActivated: root.composeRequested("reply", root.message) }
-    Shortcut { sequence: "A"; enabled: store.selectedMessage !== null; onActivated: root.composeRequested("reply_all", root.message) }
-    Shortcut { sequence: "F"; enabled: store.selectedMessage !== null; onActivated: root.composeRequested("forward", root.message) }
-    Shortcut { sequence: "E"; enabled: store.selectedMessage !== null; onActivated: store.archive(root.message) }
-    Shortcut { sequence: "S"; enabled: store.selectedMessage !== null; onActivated: store.toggleStar(root.message) }
-    Shortcut { sequence: "Delete"; enabled: store.selectedMessage !== null; onActivated: store.trash(root.message) }
+    Shortcut {
+        objectName: "readerZoomInShortcut"
+        sequences: [StandardKey.ZoomIn]
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.zoomIn()
+    }
+    Shortcut {
+        objectName: "readerZoomOutShortcut"
+        sequences: [StandardKey.ZoomOut]
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.zoomOut()
+    }
+    Shortcut {
+        objectName: "readerZoomResetShortcut"
+        sequence: "Ctrl+0"
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.resetZoom()
+    }
+    Shortcut {
+        sequence: "PageDown"
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.scrollReaderPage(1)
+    }
+    Shortcut {
+        sequence: "PageUp"
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.scrollReaderPage(-1)
+    }
+    Shortcut {
+        sequence: "Home"
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.scrollReaderToStart()
+    }
+    Shortcut {
+        sequence: "End"
+        enabled: root.readerShortcutsEnabled
+        onActivated: root.scrollReaderToEnd()
+    }
+    Shortcut { sequence: "R"; enabled: root.readerShortcutsEnabled; onActivated: root.composeRequested("reply", root.message) }
+    Shortcut { sequence: "A"; enabled: root.readerShortcutsEnabled; onActivated: root.composeRequested("reply_all", root.message) }
+    Shortcut { sequence: "F"; enabled: root.readerShortcutsEnabled; onActivated: root.composeRequested("forward", root.message) }
+    Shortcut { sequence: "E"; enabled: root.readerShortcutsEnabled; onActivated: store.archive(root.message) }
+    Shortcut { sequence: "S"; enabled: root.readerShortcutsEnabled; onActivated: store.toggleStar(root.message) }
+    Shortcut { sequence: "Shift+U"; enabled: root.readerShortcutsEnabled && !root.messageIsUnread; onActivated: root.markUnread() }
+    Shortcut { sequence: "Delete"; enabled: root.readerShortcutsEnabled; onActivated: store.trash(root.message) }
 
     onMessageChanged: {
+        const nextMessageId = currentMessageId()
         attachmentStatus = ""
         pendingSaveSource = ""
         htmlRenderFailed = false
+        if (nextMessageId !== _displayedMessageId) {
+            ++_zoomScrollRestoreGeneration
+            _zoomScrollRestorePending = false
+            resetZoomWheelAccumulator()
+            bodyFlick.cancelFlick()
+            bodyFlick.contentY = 0
+        }
+        _displayedMessageId = nextMessageId
         deferThreadAvatarLayout()
     }
 }

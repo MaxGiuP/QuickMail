@@ -15,6 +15,7 @@ Item {
     property color mutedColor: "#6b7280"
     property color linkColor: "#2563eb"
     property color pageColor: "#ffffff"
+    property real zoomFactor: 1.0
     property bool failed: false
     signal externalLinkRequested(url url)
     signal renderingFailed()
@@ -110,9 +111,16 @@ Item {
             effectiveForegroundColor) : linkColor
     readonly property string effectiveColorScheme: isDarkColor(effectivePageColor)
         ? "dark" : "light"
-    readonly property real rendererHeight: Math.max(160, nativeRenderer.contentHeight + 8)
-    readonly property real renderedContentWidth: Math.max(width, nativeRenderer.contentWidth)
-    readonly property bool hasHorizontalOverflow: nativeRenderer.contentWidth > width + 1
+    readonly property real effectiveZoomFactor: {
+        const requested = Number(zoomFactor)
+        return isFinite(requested) ? Math.max(0.5, Math.min(2, requested)) : 1
+    }
+    readonly property real rendererHeight: Math.max(160,
+        nativeRenderer.contentHeight * effectiveZoomFactor + 8)
+    readonly property real renderedContentWidth: Math.max(width,
+        nativeRenderer.contentWidth * effectiveZoomFactor)
+    readonly property bool hasHorizontalOverflow:
+        nativeRenderer.contentWidth * effectiveZoomFactor > width + 1
     readonly property bool horizontalScrollAvailable: horizontalViewport.interactive
         && horizontalViewport.contentWidth > horizontalViewport.width + 1
 
@@ -646,7 +654,8 @@ Item {
     Flickable {
         id: horizontalViewport
         anchors.fill: parent
-        contentWidth: Math.max(width, nativeRenderer.contentWidth)
+        contentWidth: Math.max(width,
+            nativeRenderer.contentWidth * root.effectiveZoomFactor)
         contentHeight: height
         clip: true
         interactive: contentWidth > width + 1
@@ -658,8 +667,10 @@ Item {
 
         TextEdit {
             id: nativeRenderer
-            width: horizontalViewport.width
-            height: horizontalViewport.height
+            width: horizontalViewport.width / root.effectiveZoomFactor
+            height: horizontalViewport.height / root.effectiveZoomFactor
+            scale: root.effectiveZoomFactor
+            transformOrigin: Item.TopLeft
             baseUrl: "about:blank"
             text: root.renderedHtml
             textFormat: TextEdit.RichText
@@ -678,5 +689,11 @@ Item {
     }
 
     onHtmlChanged: horizontalViewport.contentX = 0
-    onImplicitHeightChanged: preferredHeightChanged(implicitHeight)
+    onEffectiveZoomFactorChanged: Qt.callLater(function() {
+        horizontalViewport.contentX = Math.max(0, Math.min(
+            horizontalViewport.contentX,
+            horizontalViewport.contentWidth - horizontalViewport.width))
+        horizontalViewport.returnToBounds()
+    })
+    onRendererHeightChanged: preferredHeightChanged(rendererHeight)
 }
