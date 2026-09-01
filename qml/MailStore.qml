@@ -565,10 +565,11 @@ QtObject {
     }
 
     function selectAccount(id) {
-        if (activeAccountId === String(id)) return
+        const requestedAccountId = String(id)
+        if (activeAccountId === requestedAccountId) return
         ++messageListGeneration
         ++readerGeneration
-        activeAccountId = String(id)
+        activeAccountId = requestedAccountId
         activeFolderId = ""
         folders = []
         messages = []
@@ -585,9 +586,11 @@ QtObject {
     }
 
     function selectFolder(id) {
+        const requestedFolderId = String(id)
         draftsOpen = false
-        if (activeFolderId === String(id)) return
-        activeFolderId = String(id)
+        if (view !== "compose") view = "mail"
+        if (activeFolderId === requestedFolderId) return
+        activeFolderId = requestedFolderId
         loadMessages(true)
     }
 

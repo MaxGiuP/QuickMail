@@ -29,6 +29,13 @@ Rectangle {
     readonly property var taskItems: root.buildTaskItems()
     readonly property int selectedEventCount: root.eventsForDate(selectedDate).length
     readonly property int selectedTaskCount: root.tasksForDate(selectedDate).length
+    readonly property int calendarColumnCount: 7
+    readonly property int calendarWeekRowCount: 6
+    readonly property real calendarDayCellHeight: compactLayout ? 32 : 36
+    readonly property real calendarColumnWidth: calendarGrid.width > 0
+        ? (calendarGrid.width - calendarGrid.columnSpacing * (calendarColumnCount - 1))
+            / calendarColumnCount
+        : 0
 
     color: Theme.canvas
 
@@ -238,15 +245,28 @@ Rectangle {
     }
 
     function showPreviousMonth() {
-        visibleMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1)
+        moveToMonth(-1)
     }
 
     function showNextMonth() {
-        visibleMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1)
+        moveToMonth(1)
+    }
+
+    function moveToMonth(offset) {
+        const targetMonth = new Date(visibleMonth.getFullYear(),
+            visibleMonth.getMonth() + offset, 1)
+        const maximumDay = new Date(targetMonth.getFullYear(),
+            targetMonth.getMonth() + 1, 0).getDate()
+        const preferredDay = Math.max(1, Math.min(selectedDate.getDate(), maximumDay))
+        selectDate(new Date(targetMonth.getFullYear(), targetMonth.getMonth(), preferredDay))
     }
 
     function showToday() {
         selectDate(today)
+    }
+
+    function returnToMail() {
+        backRequested()
     }
 
     function openEventComposer() {
@@ -384,7 +404,7 @@ Rectangle {
         let detail = ""
         if (events > 0) detail += AgendaTranslations.tr(", %n event(s)", events)
         if (tasks > 0) detail += AgendaTranslations.tr(", %n open task(s)", tasks)
-        return Qt.formatDate(dateValue, "dddd d MMMM yyyy") + detail
+        return AgendaTranslations.formatDate(dateValue, "dddd d MMMM yyyy") + detail
     }
 
     Timer {
@@ -407,15 +427,58 @@ Rectangle {
             Layout.rightMargin: 10
             spacing: 9
 
-            IconButton {
-                visible: root.mobile
-                iconName: "back"
-                tip: AgendaTranslations.tr("Back to mail")
-                Accessible.name: tip
-                onClicked: root.backRequested()
+            Button {
+                id: backButton
+
+                implicitWidth: root.compactLayout ? 40 : backButtonContent.implicitWidth + 18
+                implicitHeight: 40
+                leftPadding: 9
+                rightPadding: 9
+                hoverEnabled: true
+                focusPolicy: Qt.StrongFocus
+                text: AgendaTranslations.tr("Back to mail")
+                Accessible.name: text
+                onClicked: root.returnToMail()
+
+                contentItem: Row {
+                    id: backButtonContent
+                    spacing: 6
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: Theme.icon("back")
+                        color: Theme.textSecondary
+                        font.family: Theme.iconFont
+                        font.pixelSize: 20
+                    }
+
+                    Text {
+                        visible: !root.compactLayout
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: backButton.text
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Medium
+                    }
+                }
+
+                background: Rectangle {
+                    radius: Theme.radiusSmall
+                    color: backButton.down ? Theme.surfaceSelected
+                        : backButton.hovered || backButton.visualFocus
+                            ? Theme.surfaceHover : "transparent"
+                    border.width: backButton.visualFocus ? 1 : 0
+                    border.color: Theme.accent
+                }
+
+                ToolTip.visible: backButton.hovered && root.compactLayout
+                ToolTip.text: backButton.text
+                ToolTip.delay: 500
             }
 
             Rectangle {
+                visible: root.width >= 420
                 Layout.preferredWidth: 38
                 Layout.preferredHeight: 38
                 radius: 19
@@ -444,7 +507,7 @@ Rectangle {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: Qt.formatDate(root.selectedDate, "dddd, d MMMM yyyy")
+                    text: AgendaTranslations.formatDate(root.selectedDate, "dddd, d MMMM yyyy")
                     color: Theme.textMuted
                     font.family: Theme.fontFamily
                     font.pixelSize: 11
@@ -534,7 +597,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: Qt.formatDate(root.visibleMonth, "MMMM yyyy")
+                            text: AgendaTranslations.formatDate(root.visibleMonth, "MMMM yyyy")
                             color: Theme.text
                             font.family: Theme.fontFamily
                             font.pixelSize: 17
@@ -570,11 +633,15 @@ Rectangle {
                     }
 
                     GridLayout {
+                        id: calendarGrid
+
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 24
-                        columns: 7
+                        Layout.alignment: Qt.AlignTop
+                        columns: root.calendarColumnCount
+                        rows: root.calendarWeekRowCount + 1
                         columnSpacing: 4
-                        rowSpacing: 0
+                        rowSpacing: 4
+                        uniformCellWidths: true
 
                         Repeater {
                             model: [AgendaTranslations.tr("Mon"), AgendaTranslations.tr("Tue"), AgendaTranslations.tr("Wed"), AgendaTranslations.tr("Thu"),
@@ -582,23 +649,18 @@ Rectangle {
                             Text {
                                 required property string modelData
                                 Layout.fillWidth: true
+                                Layout.minimumHeight: 22
+                                Layout.preferredHeight: 22
+                                Layout.maximumHeight: 22
                                 text: modelData
                                 color: Theme.textMuted
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 9
+                                font.pixelSize: 10
                                 font.weight: Font.DemiBold
                                 horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
                             }
                         }
-                    }
-
-                    GridLayout {
-                        id: monthGrid
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        columns: 7
-                        columnSpacing: 4
-                        rowSpacing: 4
 
                         Repeater {
                             model: root.monthDays
@@ -617,61 +679,78 @@ Rectangle {
                                     function(task) { return task.done !== true }).length
 
                                 Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                Layout.minimumWidth: 30
-                                Layout.minimumHeight: 30
+                                Layout.minimumWidth: 0
+                                Layout.minimumHeight: root.calendarDayCellHeight
+                                Layout.preferredHeight: root.calendarDayCellHeight
+                                Layout.maximumHeight: root.calendarDayCellHeight
                                 hoverEnabled: true
                                 focusPolicy: Qt.StrongFocus
                                 Accessible.name: root.dayAccessibleName(day)
                                 Accessible.description: selected ? AgendaTranslations.tr("Selected date") : ""
                                 onClicked: root.selectDate(day)
 
-                                contentItem: ColumnLayout {
-                                    spacing: 1
+                                contentItem: Item {
+                                    Rectangle {
+                                        id: dayMarker
 
-                                    Text {
-                                        Layout.alignment: Qt.AlignHCenter
-                                        text: dayButton.day.getDate()
-                                        color: dayButton.selected ? Theme.accentSoftText
-                                            : dayButton.inMonth ? Theme.text : Theme.textMuted
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: 12
-                                        font.weight: dayButton.currentDay || dayButton.selected
-                                            ? Font.Bold : Font.Normal
+                                        width: 29
+                                        height: 29
+                                        radius: width / 2
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        y: dayButton.eventCount > 0 || dayButton.openTaskCount > 0
+                                            ? 0 : Math.round((parent.height - height) / 2)
+                                        color: dayButton.selected ? Theme.accent
+                                            : dayButton.down ? Theme.surfaceSelected
+                                            : dayButton.hovered ? Theme.surfaceHover : "transparent"
+                                        border.width: dayButton.visualFocus ? 2
+                                            : dayButton.currentDay ? 1 : 0
+                                        border.color: dayButton.visualFocus
+                                            ? (dayButton.selected ? Theme.accentText : Theme.accent)
+                                            : Theme.accent
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: dayButton.day.getDate()
+                                            color: dayButton.selected ? Theme.accentText
+                                                : dayButton.currentDay ? Theme.accent
+                                                : dayButton.inMonth ? Theme.text : Theme.textMuted
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: 12
+                                            font.weight: dayButton.currentDay || dayButton.selected
+                                                ? Font.DemiBold : Font.Normal
+                                        }
                                     }
 
                                     Row {
-                                        Layout.alignment: Qt.AlignHCenter
+                                        anchors.top: dayMarker.bottom
+                                        anchors.topMargin: 1
+                                        anchors.horizontalCenter: parent.horizontalCenter
                                         spacing: 3
                                         Rectangle {
                                             visible: dayButton.eventCount > 0
                                             width: 4
                                             height: 4
                                             radius: 2
-                                            color: dayButton.selected ? Theme.accentSoftText : Theme.accent
+                                            color: Theme.accent
                                         }
                                         Rectangle {
                                             visible: dayButton.openTaskCount > 0
                                             width: 4
                                             height: 4
                                             radius: 2
-                                            color: dayButton.selected ? Theme.accentSoftText : Theme.success
+                                            color: Theme.success
                                         }
                                     }
                                 }
 
                                 background: Rectangle {
-                                    radius: Theme.radiusSmall
-                                    color: dayButton.selected ? Theme.accentSoft
-                                        : dayButton.down ? Theme.surfaceSelected
-                                        : dayButton.hovered ? Theme.surfaceHover : "transparent"
-                                    border.width: dayButton.visualFocus || (dayButton.currentDay
-                                        && !dayButton.selected) ? 1 : 0
-                                    border.color: dayButton.visualFocus ? Theme.accent : Theme.textMuted
+                                    color: "transparent"
                                 }
                             }
                         }
                     }
+
+                    Item { Layout.fillHeight: true }
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -687,7 +766,7 @@ Rectangle {
                             text: AgendaTranslations.tr("Events")
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                         }
                         Rectangle {
                             Layout.preferredWidth: 5
@@ -699,7 +778,7 @@ Rectangle {
                             text: AgendaTranslations.tr("Open tasks")
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                         }
                         Item { Layout.fillWidth: true }
                         Text {
@@ -707,7 +786,7 @@ Rectangle {
                             text: AgendaTranslations.tr("%1 accounts").arg(root.accountDestinations.length - 1)
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                         }
                     }
                 }
@@ -747,7 +826,7 @@ Rectangle {
                             Text {
                                 Layout.fillWidth: true
                                 text: root.activeTab === 0
-                                    ? Qt.formatDate(root.selectedDate, "dddd, d MMMM")
+                                    ? AgendaTranslations.formatDate(root.selectedDate, "dddd, d MMMM")
                                     : AgendaTranslations.tr("All tasks")
                                 color: Theme.text
                                 font.family: Theme.fontFamily

@@ -236,6 +236,17 @@ Item {
             root.expect(request.method === fakeRpc.methods.mailList
                 && request.params.mailboxId === "Server/INBOX",
                 "folder shortcut sent a role alias instead of the provider mailbox ID")
+            const requestsBeforeMailReturn = fakeRpc.requests.length
+            store.view = "calendar"
+            store.selectFolder("Server/INBOX")
+            root.expect(store.view === "mail"
+                    && fakeRpc.requests.length === requestsBeforeMailReturn,
+                "selecting the current folder did not return from calendar to mail")
+            store.view = "calendar"
+            store.selectAccount("account-a")
+            root.expect(store.view === "calendar",
+                "automatic account selection overrode an explicit calendar surface")
+            store.view = "mail"
             const requestsBeforeMissingRole = fakeRpc.requests.length
             root.expect(!store.selectFolderRole("unread")
                 && store.activeFolderId === "Server/INBOX"

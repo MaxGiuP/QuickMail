@@ -253,6 +253,12 @@ QtObject {
         return english
     }
 
+    function formatDate(value, pattern) {
+        const date = value instanceof Date ? value : new Date(value)
+        if (isNaN(date.getTime())) return ""
+        return Qt.locale(localeName).toString(date, String(pattern || ""))
+    }
+
     function tr(source, count) {
         const table = tableForLanguage()
         let translated = table[source]

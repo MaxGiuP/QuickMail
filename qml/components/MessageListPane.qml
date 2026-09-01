@@ -14,13 +14,17 @@ Rectangle {
 
     color: Theme.canvas
 
+    function displayFolderName(folder) {
+        return FolderPresentation.displayName(folder)
+    }
+
     function folderTitle() {
         const folder = store.activeFolder
         if (!folder) {
             const id = String(store.activeFolderId || "inbox")
-            return id.charAt(0).toUpperCase() + id.slice(1)
+            return displayFolderName({ id: id, name: id })
         }
-        return String(folder.name || folder.display_name || folder.id || "Mail")
+        return displayFolderName(folder)
     }
 
     function moveCursor(delta) {

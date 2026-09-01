@@ -161,6 +161,7 @@ Item {
     }
 
     MessageListPane {
+        id: messageListPane
         x: 1500
         width: 420
         height: 700
@@ -168,6 +169,7 @@ Item {
     }
 
     NavigationPane {
+        id: navigationPane
         x: 1930
         width: 320
         height: 700
@@ -213,6 +215,46 @@ Item {
             if (root.protectedSurfaces < 20)
                 root.fail("only found " + root.protectedSurfaces
                     + " protected untrusted text surfaces")
+
+            const nestedFolder = {
+                id: "[Gmail]/Projects////2026",
+                name: "[Gmail]///Projects////2026",
+                role: "other"
+            }
+            const nestedId = nestedFolder.id
+            const nestedName = nestedFolder.name
+            if (navigationPane.displayFolderName(nestedFolder) !== "Projects / 2026")
+                root.fail("Gmail namespace or repeated hierarchy separators remained visible")
+            if (messageListPane.displayFolderName(nestedFolder) !== "Projects / 2026")
+                root.fail("message-list folder formatting differs from navigation formatting")
+            if (nestedFolder.id !== nestedId || nestedFolder.name !== nestedName)
+                root.fail("folder presentation changed provider mailbox identity")
+
+            const localizedSent = {
+                id: "server-sent",
+                name: "[Google Mail]//Gesendet",
+                role: "sent"
+            }
+            if (navigationPane.displayFolderName(localizedSent) !== "Gesendet"
+                    || navigationPane.displayFolderIcon(localizedSent) !== "sent")
+                root.fail("localized special-folder label or icon was lost")
+            if (navigationPane.displayFolderName({
+                    id: "remote-sent", name: "[Google Mail]/SENT MAIL", role: "sent"
+                }) !== "Sent")
+                root.fail("canonical special-folder label was not capitalized")
+            if (navigationPane.displayFolderName({
+                    id: "remote-spam", name: "[Gmail]/Posta indesiderata", role: "spam"
+                }) !== "Posta indesiderata"
+                    || navigationPane.displayFolderIcon({
+                        id: "remote-spam", name: "[Gmail]/Posta indesiderata", role: "spam"
+                    }) !== "error")
+                root.fail("localized spam folder presentation regressed")
+
+            const originalActiveFolder = store.activeFolder
+            store.activeFolder = localizedSent
+            if (messageListPane.folderTitle() !== "Gesendet")
+                root.fail("selected mailbox header retained its provider namespace")
+            store.activeFolder = originalActiveFolder
             Qt.quit()
         }
     }

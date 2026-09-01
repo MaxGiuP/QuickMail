@@ -32,12 +32,16 @@ Rectangle {
     readonly property bool allDay: !isTask && entry && (entry.allDay === true
         || entry.all_day === true)
 
-    implicitHeight: compact ? 64 : 72
+    implicitHeight: compact ? 64 : 68
     radius: Theme.radius
     color: rowMouse.containsMouse ? Theme.surfaceHover : Theme.surface
     border.width: 1
-    border.color: Theme.borderSoft
+    border.color: rowMouse.containsMouse ? Theme.border : Theme.borderSoft
     opacity: completed ? 0.62 : pending ? 0.72 : 1
+
+    Behavior on color {
+        ColorAnimation { duration: 100 }
+    }
 
     function dateTime(value) {
         if (value === undefined || value === null || value === "") return NaN
@@ -62,16 +66,18 @@ Rectangle {
             if (isNaN(root.dueTime)) return AgendaTranslations.tr("No due date")
             if (root.taskDueDateOnly) {
                 const dueDate = root.localDateFromUtcDay(root.dueTime)
-                return AgendaTranslations.tr("Due %1").arg(Qt.formatDate(dueDate, "ddd d MMM"))
+                return AgendaTranslations.tr("Due %1").arg(
+                    AgendaTranslations.formatDate(dueDate, "ddd d MMM"))
             }
-            return AgendaTranslations.tr("Due %1").arg(Qt.formatDateTime(new Date(root.dueTime), "ddd d MMM, HH:mm"))
+            return AgendaTranslations.tr("Due %1").arg(
+                AgendaTranslations.formatDate(new Date(root.dueTime), "ddd d MMM, HH:mm"))
         }
         if (root.allDay) return AgendaTranslations.tr("All day")
         if (isNaN(root.startTime)) return AgendaTranslations.tr("Time unavailable")
         const start = new Date(root.startTime)
-        if (isNaN(root.endTime)) return Qt.formatDateTime(start, "HH:mm")
-        return Qt.formatDateTime(start, "HH:mm") + "–"
-            + Qt.formatDateTime(new Date(root.endTime), "HH:mm")
+        if (isNaN(root.endTime)) return AgendaTranslations.formatDate(start, "HH:mm")
+        return AgendaTranslations.formatDate(start, "HH:mm") + "–"
+            + AgendaTranslations.formatDate(new Date(root.endTime), "HH:mm")
     }
 
     function destinationText() {
@@ -91,10 +97,10 @@ Rectangle {
     RowLayout {
         anchors.fill: parent
         anchors.leftMargin: 12
-        anchors.rightMargin: 6
-        anchors.topMargin: 7
-        anchors.bottomMargin: 7
-        spacing: 10
+        anchors.rightMargin: 8
+        anchors.topMargin: 6
+        anchors.bottomMargin: 6
+        spacing: 8
 
         CheckBox {
             id: taskCheck
@@ -134,10 +140,10 @@ Rectangle {
 
         Rectangle {
             visible: !root.isTask
-            Layout.preferredWidth: 4
+            Layout.preferredWidth: 3
             Layout.fillHeight: true
-            Layout.topMargin: 5
-            Layout.bottomMargin: 5
+            Layout.topMargin: 6
+            Layout.bottomMargin: 6
             radius: 2
             color: Theme.accent
         }
@@ -205,8 +211,8 @@ Rectangle {
             iconName: "trash"
             tip: root.isTask ? AgendaTranslations.tr("Delete task") : AgendaTranslations.tr("Delete event")
             destructive: true
-            implicitWidth: 34
-            implicitHeight: 34
+            implicitWidth: 32
+            implicitHeight: 32
             Accessible.name: tip
             onClicked: root.deleteRequested()
         }

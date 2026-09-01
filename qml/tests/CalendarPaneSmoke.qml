@@ -10,6 +10,7 @@ ApplicationWindow {
     width: 980
     height: 720
     color: Theme.canvas
+    property int backRequests: 0
 
     function expect(condition, message) {
         if (condition) return
@@ -86,6 +87,7 @@ ApplicationWindow {
         store: fakeStore
         selectedDate: new Date(2026, 8, 1)
         visibleMonth: new Date(2026, 8, 1)
+        onBackRequested: ++window.backRequests
     }
 
     AgendaComposer {
@@ -103,6 +105,18 @@ ApplicationWindow {
                 "local, Gmail, and Outlook destinations were not exposed")
             window.expect(calendarPane.monthDays.length === 42,
                 "month view did not build a six-week grid")
+            window.expect(calendarPane.calendarColumnCount === 7
+                    && calendarPane.calendarWeekRowCount === 6,
+                "calendar geometry did not expose seven columns and six weeks")
+            window.expect(calendarPane.calendarColumnWidth > 0
+                    && calendarPane.calendarDayCellHeight > 0
+                    && calendarPane.calendarDayCellHeight <= 36,
+                "calendar cells were not rendered with restrained fixed geometry")
+            for (let dayIndex = 0; dayIndex < calendarPane.monthDays.length; ++dayIndex) {
+                window.expect(calendarPane.monthDays[dayIndex].getDay()
+                        === (dayIndex + 1) % 7,
+                    "date grid column " + dayIndex + " did not align Monday through Sunday")
+            }
             window.expect(calendarPane.selectedAgenda.length === 2,
                 "selected day did not combine its event and due task")
             window.expect(calendarPane.taskItems.length === 2,
@@ -136,6 +150,11 @@ ApplicationWindow {
             window.expect(AgendaTranslations.tr("%n task(s)", 1) === "1 Aufgabe"
                     && AgendaTranslations.tr("%n task(s)", 3) === "3 Aufgaben",
                 "German task plurals were not translated")
+            const germanDate = AgendaTranslations.formatDate(
+                new Date(2026, 8, 1), "dddd, d MMMM yyyy").toLowerCase()
+            window.expect(germanDate.indexOf("dienstag") === 0
+                    && germanDate.indexOf("september") >= 0,
+                "German weekday and month names were not localized")
 
             AgendaTranslations.localeOverride = "it_IT"
             window.expect(AgendaTranslations.tr("Calendar") === "Calendario",
@@ -146,6 +165,11 @@ ApplicationWindow {
             window.expect(AgendaTranslations.tr(", %n event(s)", 1) === ", 1 evento"
                     && AgendaTranslations.tr(", %n event(s)", 2) === ", 2 eventi",
                 "Italian event plurals were not translated")
+            const italianDate = AgendaTranslations.formatDate(
+                new Date(2026, 8, 1), "dddd, d MMMM yyyy").toLowerCase()
+            window.expect(italianDate.indexOf("marted") === 0
+                    && italianDate.indexOf("settembre") >= 0,
+                "Italian weekday and month names were not localized")
 
             AgendaTranslations.localeOverride = "fr_FR"
             window.expect(AgendaTranslations.tr("Calendar") === "Calendar"
@@ -192,6 +216,23 @@ ApplicationWindow {
                 "event deletion did not reach the store")
             window.expect(fakeStore.reloads >= 5,
                 "successful mutations did not refresh the agenda")
+
+            calendarPane.returnToMail()
+            window.expect(window.backRequests === 1,
+                "the persistent back-to-mail action did not emit backRequested")
+
+            calendarPane.selectDate(new Date(2026, 0, 31))
+            calendarPane.showNextMonth()
+            window.expect(calendarPane.visibleMonth.getFullYear() === 2026
+                    && calendarPane.visibleMonth.getMonth() === 1
+                    && calendarPane.selectedDate.getFullYear() === 2026
+                    && calendarPane.selectedDate.getMonth() === 1
+                    && calendarPane.selectedDate.getDate() === 28,
+                "month navigation did not keep the selected date visible and valid")
+            calendarPane.showPreviousMonth()
+            window.expect(calendarPane.visibleMonth.getMonth() === 0
+                    && calendarPane.selectedDate.getMonth() === 0,
+                "previous-month navigation left the selected date off-screen")
             Qt.exit(0)
         }
     }

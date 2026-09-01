@@ -31,6 +31,14 @@ Rectangle {
         return remote.length > 0 ? remote : standardFolders
     }
 
+    function displayFolderName(folder) {
+        return FolderPresentation.displayName(folder)
+    }
+
+    function displayFolderIcon(folder) {
+        return FolderPresentation.iconName(folder)
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 10
@@ -185,10 +193,8 @@ Rectangle {
                 color: folderList.currentIndex === index ? Theme.surfaceSelected
                     : folderMouse.containsMouse ? Theme.surfaceHover : "transparent"
                 readonly property string folderId: String(modelData.id || modelData.folder_id || "")
-                readonly property string folderName: String(modelData.name || modelData.display_name || folderId)
-                readonly property string folderIcon: String(modelData.icon ||
-                    (folderId === "inbox" ? "inbox" : folderId === "trash" ? "trash"
-                        : folderId === "sent" ? "sent" : "folder"))
+                readonly property string folderName: root.displayFolderName(modelData)
+                readonly property string folderIcon: root.displayFolderIcon(modelData)
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 10

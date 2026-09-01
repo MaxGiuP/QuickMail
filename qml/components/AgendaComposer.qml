@@ -253,7 +253,7 @@ Dialog {
                     font.weight: Font.DemiBold
                 }
                 Text {
-                    text: Qt.formatDate(root.selectedDate, "dddd, d MMMM")
+                    text: AgendaTranslations.formatDate(root.selectedDate, "dddd, d MMMM")
                     color: Theme.textMuted
                     font.family: Theme.fontFamily
                     font.pixelSize: 11
@@ -403,11 +403,32 @@ Dialog {
                 CheckBox {
                     id: dueDateCheck
                     visible: root.entryKind === "task"
+                    implicitHeight: 34
                     text: AgendaTranslations.tr("Set a due date")
                     checked: true
                     enabled: !root.submitting
                     focusPolicy: Qt.StrongFocus
                     Accessible.name: text
+                    indicator: Rectangle {
+                        x: 0
+                        y: Math.round((dueDateCheck.height - height) / 2)
+                        implicitWidth: 20
+                        implicitHeight: 20
+                        radius: 6
+                        color: dueDateCheck.checked ? Theme.accent : "transparent"
+                        border.width: dueDateCheck.visualFocus ? 2 : 1
+                        border.color: dueDateCheck.checked || dueDateCheck.visualFocus
+                            ? Theme.accent : Theme.textMuted
+
+                        Text {
+                            anchors.centerIn: parent
+                            visible: dueDateCheck.checked
+                            text: Theme.icon("check")
+                            color: Theme.accentText
+                            font.family: Theme.iconFont
+                            font.pixelSize: 15
+                        }
+                    }
                     contentItem: Text {
                         text: dueDateCheck.text
                         color: Theme.text
@@ -434,10 +455,31 @@ Dialog {
                 CheckBox {
                     id: allDayCheck
                     visible: root.entryKind === "event"
+                    implicitHeight: 34
                     text: AgendaTranslations.tr("All-day event")
                     enabled: !root.submitting
                     focusPolicy: Qt.StrongFocus
                     Accessible.name: text
+                    indicator: Rectangle {
+                        x: 0
+                        y: Math.round((allDayCheck.height - height) / 2)
+                        implicitWidth: 20
+                        implicitHeight: 20
+                        radius: 6
+                        color: allDayCheck.checked ? Theme.accent : "transparent"
+                        border.width: allDayCheck.visualFocus ? 2 : 1
+                        border.color: allDayCheck.checked || allDayCheck.visualFocus
+                            ? Theme.accent : Theme.textMuted
+
+                        Text {
+                            anchors.centerIn: parent
+                            visible: allDayCheck.checked
+                            text: Theme.icon("check")
+                            color: Theme.accentText
+                            font.family: Theme.iconFont
+                            font.pixelSize: 15
+                        }
+                    }
                     contentItem: Text {
                         text: allDayCheck.text
                         color: Theme.text

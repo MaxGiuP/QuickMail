@@ -2,6 +2,7 @@ module QuickMail
 singleton Theme 1.0 Theme.qml
 singleton AppSettings 1.0 AppSettings.qml
 singleton AgendaTranslations 1.0 AgendaTranslations.qml
+singleton FolderPresentation 1.0 FolderPresentation.qml
 RpcClient 1.0 RpcClient.qml
 MailStore 1.0 MailStore.qml
 MainWindow 1.0 MainWindow.qml
