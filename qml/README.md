@@ -23,8 +23,13 @@ handed directly to the connected local daemon for keyring storage.
 The desktop launcher starts the user service when available, hands `mailto:`
 links to an already-running window over Quickshell IPC, and otherwise resolves
 the QML tree from the installed `share/quickmail/qml` layout. Attachment
-downloads are cached by the daemon; Open uses the desktop URL handler, while
-Save prompts for a destination and copies without invoking a shell.
+downloads are cached privately by the daemon. Preview opens an in-app reader
+for PDFs, raster images, text and source files, audio, video, and office
+documents (converted to a temporary read-only PDF when LibreOffice is
+available). Unknown formats receive a bounded 64 KiB binary inspection view,
+so every attachment has a safe in-app surface. The original can still be handed
+to the desktop URL handler explicitly, while Save prompts for a destination and
+copies without invoking a shell.
 
 The reader renders `bodyHtml` with Qt's native rich-text document engine, so
 formatting, tables, links, background colors, and inline images do not require
@@ -55,4 +60,5 @@ The script lints every component, loads the full responsive UI offscreen, and
 exercises brokered Google and Microsoft setup payloads, the RPC field contract,
 account isolation, conversation rendering, the floating compose lifecycle,
 reply-all/forward construction, sync error recovery, attachment disposition,
-safe HTML presentation, and `mailto:` parsing.
+native PDF/text/binary attachment previews, safe HTML presentation, and
+`mailto:` parsing.

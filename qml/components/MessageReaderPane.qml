@@ -40,6 +40,7 @@ Rectangle {
         ? root.Window.window.activeFocusItem : null
     readonly property bool readerShortcutsEnabled: root.visible && root.enabled
         && store.selectedMessage !== null && !readerSettings.visible
+        && !attachmentViewer.visible
         && itemBelongsToReader(readerActiveFocusItem)
     readonly property bool threadAvatarLayoutReady: _threadAvatarLayoutReady
     property bool _threadAvatarLayoutReady: false
@@ -363,7 +364,27 @@ Rectangle {
         }
     }
 
-    function attachmentDownloaded(result, error, openWhenReady) {
+    function beginAttachmentSave(path, filenameValue) {
+        pendingSaveSource = String(path || "")
+        if (pendingSaveSource === "" || pendingSaveSource[0] !== "/"
+                || pendingSaveSource.indexOf("\u0000") >= 0) {
+            pendingSaveSource = ""
+            store.errorText = "The attachment path is invalid"
+            return
+        }
+        const directory = StandardPaths.writableLocation(StandardPaths.DownloadLocation)
+        if (directory === "") {
+            pendingSaveSource = ""
+            store.errorText = "The Downloads folder is unavailable"
+            return
+        }
+        const filename = safeFilename(filenameValue)
+        saveDialog.currentFolder = localFileUrl(directory)
+        saveDialog.selectedFile = localFileUrl(directory + "/" + filename)
+        saveDialog.open()
+    }
+
+    function attachmentDownloaded(result, error, previewWhenReady) {
         if (error) {
             attachmentStatus = ""
             store.errorText = error.message || "The attachment could not be downloaded"
@@ -376,27 +397,13 @@ Rectangle {
             store.errorText = "The mail service returned an invalid attachment path"
             return
         }
-        if (openWhenReady) {
-            attachmentStatus = "Opening " + safeFilename(result.filename)
-            if (!Qt.openUrlExternally(url)) {
-                attachmentStatus = ""
-                store.errorText = "No application is available to open this attachment"
-            } else {
-                attachmentStatus = "Opened " + safeFilename(result.filename)
-            }
+        if (previewWhenReady) {
+            attachmentStatus = ""
+            if (!attachmentViewer.showFile(result))
+                store.errorText = "QuickMail could not open this attachment preview"
             return
         }
-        pendingSaveSource = path
-        const directory = StandardPaths.writableLocation(StandardPaths.DownloadLocation)
-        if (directory === "") {
-            pendingSaveSource = ""
-            store.errorText = "The Downloads folder is unavailable"
-            return
-        }
-        const filename = safeFilename(result.filename)
-        saveDialog.currentFolder = localFileUrl(directory)
-        saveDialog.selectedFile = localFileUrl(directory + "/" + filename)
-        saveDialog.open()
+        beginAttachmentSave(path, result.filename)
     }
 
     ColumnLayout {
@@ -1112,15 +1119,20 @@ Rectangle {
                                     }
                                 }
                                 Button {
-                                    text: "Open"
+                                    text: "Preview"
                                     flat: true
-                                    onClicked: root.store.downloadAttachment(
-                                        attachmentRow.modelData, true, function(result, error) {
-                                            root.attachmentDownloaded(result, error, true)
-                                        })
+                                    Accessible.name: "Preview "
+                                        + (attachmentRow.modelData.filename || "attachment")
+                                    onClicked: {
+                                        root.attachmentStatus = "Loading preview…"
+                                        root.store.downloadAttachment(
+                                            attachmentRow.modelData, true, function(result, error) {
+                                                root.attachmentDownloaded(result, error, true)
+                                            })
+                                    }
                                 }
                                 IconButton {
-                                    iconName: "archive"
+                                    iconName: "save"
                                     tip: "Save attachment"
                                     onClicked: root.store.downloadAttachment(
                                         attachmentRow.modelData, false, function(result, error) {
@@ -1182,6 +1194,14 @@ Rectangle {
         onRejected: root.pendingSaveSource = ""
     }
 
+    AttachmentViewer {
+        id: attachmentViewer
+        parent: Overlay.overlay
+        onSaveRequested: (sourcePath, filename) => {
+            root.beginAttachmentSave(sourcePath, filename)
+        }
+    }
+
     Shortcut {
         objectName: "readerZoomInShortcut"
         sequences: [StandardKey.ZoomIn]
@@ -1230,6 +1250,7 @@ Rectangle {
 
     onMessageChanged: {
         const nextMessageId = currentMessageId()
+        attachmentViewer.close()
         attachmentStatus = ""
         pendingSaveSource = ""
         htmlRenderFailed = false

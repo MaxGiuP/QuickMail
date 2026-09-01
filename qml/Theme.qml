@@ -165,7 +165,11 @@ QtObject {
             reply: "\ue15e", replyAll: "\ue15f", forward: "\ue154", close: "\ue5cd",
             send: "\ue163", attach: "\ue226", check: "\ue5ca", offline: "\ue2c1",
             error: "\ue000", chevron: "\ue5cc", account: "\ue853", settings: "\ue8b8",
-            calendar: "\ue935", thread: "\ue0bf"
+            calendar: "\ue935", thread: "\ue0bf", previous: "\ue408", next: "\ue409",
+            zoomIn: "\ue8ff", zoomOut: "\ue900", fitWidth: "\uf88d", fitPage: "\uea10",
+            rotate: "\ue419", document: "\ue873", image: "\ue3f4", code: "\ue86f",
+            play: "\ue037", pause: "\ue034", audio: "\ue405", video: "\ue04b",
+            volume: "\ue050", muted: "\ue04f", external: "\ue89e", save: "\ue161"
         }
         return icons[name] || "\ue88e"
     }
