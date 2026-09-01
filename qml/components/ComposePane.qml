@@ -127,6 +127,33 @@ Rectangle {
     function highlightBody(value) { return bodyField.applyHighlight(value) }
     function clearBodyFormatting() { return bodyField.clearSelectionFormatting() }
 
+    function toggleFormattingOptions() {
+        AppSettings.composeFormattingExpanded
+            = !AppSettings.composeFormattingExpanded
+    }
+
+    function adjustBodyTextSize(direction) {
+        const step = Number(direction)
+        if (!Number.isFinite(step) || step === 0) return false
+        const next = Math.max(0, Math.min(textSize.model.length - 1,
+            textSize.currentIndex + (step < 0 ? -1 : 1)))
+        if (next === textSize.currentIndex) return false
+        textSize.currentIndex = next
+        return bodyField.applyFontSize(textSize.model[next].size)
+    }
+
+    function openBodyTextColorMenu() {
+        if (!bodyField.activeFocus) return false
+        textColorMenu.open()
+        return true
+    }
+
+    function openBodyHighlightMenu() {
+        if (!bodyField.activeFocus) return false
+        highlightMenu.open()
+        return true
+    }
+
     function focusComposer() {
         if (!open || minimized) return
         if (toField.text.trim() === "") toField.forceActiveFocus()
@@ -774,7 +801,7 @@ Rectangle {
                             ComposeFormatButton {
                                 label: "S"
                                 labelStrikeout: true
-                                tip: "Strikethrough (Ctrl+Shift+X)"
+                                tip: "Strikethrough (Alt+Shift+5 or Ctrl+Shift+X)"
                                 onClicked: bodyField.applyStrikeout()
                             }
 
@@ -792,13 +819,17 @@ Rectangle {
                                 currentIndex: 1
                                 Accessible.name: "Text size"
                                 onActivated: index => bodyField.applyFontSize(model[index].size)
+
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Text size (Ctrl+Shift+, / Ctrl+Shift+.)"
+                                ToolTip.delay: 450
                             }
 
                             ComposeFormatButton {
                                 label: "A"
                                 swatchColor: "#3b82f6"
-                                tip: "Text colour"
-                                onClicked: textColorMenu.open()
+                                tip: "Text colour (Alt+Shift+C)"
+                                onClicked: root.openBodyTextColorMenu()
 
                                 Menu {
                                     id: textColorMenu
@@ -813,8 +844,8 @@ Rectangle {
                             ComposeFormatButton {
                                 label: "H"
                                 swatchColor: "#fff2a8"
-                                tip: "Highlight colour"
-                                onClicked: highlightMenu.open()
+                                tip: "Highlight colour (Alt+Shift+H)"
+                                onClicked: root.openBodyHighlightMenu()
 
                                 Menu {
                                     id: highlightMenu
@@ -827,7 +858,7 @@ Rectangle {
                             }
                             ComposeFormatButton {
                                 label: "Tx"
-                                tip: "Clear formatting from selected text"
+                                tip: "Clear formatting from selected text (Ctrl+\\)"
                                 enabled: bodyField.selectionStart !== bodyField.selectionEnd
                                 onClicked: bodyField.clearSelectionFormatting()
                             }
@@ -889,11 +920,9 @@ Rectangle {
                 swatchColor: AppSettings.composeFormattingExpanded
                     ? Theme.accent : "transparent"
                 tip: AppSettings.composeFormattingExpanded
-                    ? "Hide formatting options" : "Show formatting options"
-                onClicked: {
-                    AppSettings.composeFormattingExpanded
-                        = !AppSettings.composeFormattingExpanded
-                }
+                    ? "Hide formatting options (Alt+Shift+F)"
+                    : "Show formatting options (Alt+Shift+F)"
+                onClicked: root.toggleFormattingOptions()
             }
             Text {
                 visible: root.statusText !== ""
@@ -926,25 +955,63 @@ Rectangle {
 
     Shortcut { sequence: "Ctrl+Return"; enabled: root.open; onActivated: root.send() }
     Shortcut { sequence: "Ctrl+Enter"; enabled: root.open; onActivated: root.send() }
+    // Body formatting must not intercept the same key combinations while a
+    // recipient or subject field is active.
     Shortcut {
         sequence: "Ctrl+B"
-        enabled: root.open && !root.minimized
+        enabled: root.open && !root.minimized && bodyField.activeFocus
         onActivated: bodyField.applyBold()
     }
     Shortcut {
         sequence: "Ctrl+I"
-        enabled: root.open && !root.minimized
+        enabled: root.open && !root.minimized && bodyField.activeFocus
         onActivated: bodyField.applyItalic()
     }
     Shortcut {
         sequence: "Ctrl+U"
-        enabled: root.open && !root.minimized
+        enabled: root.open && !root.minimized && bodyField.activeFocus
         onActivated: bodyField.applyUnderline()
     }
     Shortcut {
         sequence: "Ctrl+Shift+X"
-        enabled: root.open && !root.minimized
+        enabled: root.open && !root.minimized && bodyField.activeFocus
         onActivated: bodyField.applyStrikeout()
+    }
+    Shortcut {
+        sequence: "Alt+Shift+5"
+        enabled: root.open && !root.minimized && bodyField.activeFocus
+        onActivated: bodyField.applyStrikeout()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+,"
+        enabled: root.open && !root.minimized && bodyField.activeFocus
+        onActivated: root.adjustBodyTextSize(-1)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+."
+        enabled: root.open && !root.minimized && bodyField.activeFocus
+        onActivated: root.adjustBodyTextSize(1)
+    }
+    Shortcut {
+        sequence: "Ctrl+\\"
+        enabled: root.open && !root.minimized && bodyField.activeFocus
+            && bodyField.selectionStart !== bodyField.selectionEnd
+        onActivated: bodyField.clearSelectionFormatting()
+    }
+    Shortcut {
+        sequence: "Alt+Shift+C"
+        enabled: root.open && !root.minimized && bodyField.activeFocus
+        onActivated: root.openBodyTextColorMenu()
+    }
+    Shortcut {
+        sequence: "Alt+Shift+H"
+        enabled: root.open && !root.minimized && bodyField.activeFocus
+        onActivated: root.openBodyHighlightMenu()
+    }
+    Shortcut {
+        sequence: "Alt+Shift+F"
+        enabled: root.open && !root.minimized
+        onActivated: root.toggleFormattingOptions()
     }
     Shortcut { sequence: "Escape"; enabled: root.open; onActivated: root.requestClose() }
 

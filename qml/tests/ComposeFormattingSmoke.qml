@@ -70,17 +70,23 @@ Item {
                 "plain draft markup was interpreted as HTML")
 
             const toolbarState = composer.formattingExpanded
-            AppSettings.composeFormattingExpanded = !toolbarState
+            composer.toggleFormattingOptions()
             root.expect(composer.formattingExpanded === !toolbarState,
-                "formatting toolbar visibility was not adjustable")
-            AppSettings.composeFormattingExpanded = toolbarState
+                "formatting toolbar keyboard action did not toggle visibility")
+            composer.toggleFormattingOptions()
+            root.expect(composer.formattingExpanded === toolbarState,
+                "formatting toolbar keyboard action did not restore visibility")
 
             composer.selectBodyText(0, 4)
             composer.formatBodyBold()
             composer.selectBodyText(0, 4)
             composer.formatBodyUnderline()
             composer.selectBodyText(0, 4)
-            composer.formatBodySize(18)
+            root.expect(composer.adjustBodyTextSize(1),
+                "increase-text-size keyboard action was rejected")
+            composer.selectBodyText(5, 8)
+            root.expect(composer.adjustBodyTextSize(-1),
+                "decrease-text-size keyboard action was rejected")
             composer.selectBodyText(0, 4)
             composer.formatBodyColor("#ef5350")
             composer.selectBodyText(14, 17)
@@ -94,6 +100,8 @@ Item {
                 "underline formatting was not retained as HTML")
             root.expect(composer.editorBodyHtml.indexOf("font-size:18px") >= 0,
                 "adjustable text size was not retained as HTML")
+            root.expect(composer.editorBodyHtml.indexOf("font-size:14px") >= 0,
+                "decrease-text-size action was not retained as HTML")
             root.expect(composer.editorBodyHtml.indexOf("color:#ef5350") >= 0,
                 "text colour was not retained as HTML")
             root.expect(composer.editorBodyHtml.indexOf("background-color:#fff2a8") >= 0,
