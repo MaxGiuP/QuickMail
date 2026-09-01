@@ -39,6 +39,18 @@ Item {
         navigationOpen = false
     }
 
+    function openCalendar() {
+        accountSetupOpen = false
+        navigationOpen = false
+        mobilePage = "list"
+        store.openCalendar()
+    }
+
+    function openMail() {
+        navigationOpen = false
+        store.openMailSurface()
+    }
+
     function openMessagePage() {
         if (mobile) mobilePage = "reader"
     }
@@ -148,6 +160,7 @@ Item {
                     collapsed: root.medium
                     onComposeRequested: root.startNewCompose()
                     onDraftsRequested: store.openDrafts()
+                    onCalendarRequested: root.openCalendar()
                     onAccountSetupRequested: account => root.openAccountSetup(account)
                 }
 
@@ -160,7 +173,8 @@ Item {
 
                 MessageListPane {
                     id: messageListPane
-                    visible: !store.draftsOpen && (!root.mobile || root.mobilePage === "list")
+                    visible: store.view !== "calendar" && !store.draftsOpen
+                        && (!root.mobile || root.mobilePage === "list")
                     Layout.preferredWidth: root.mobile ? -1 : root.medium ? 330 : 390
                     Layout.fillWidth: root.mobile
                     Layout.fillHeight: true
@@ -171,7 +185,7 @@ Item {
                 }
 
                 Rectangle {
-                    visible: !root.mobile && !store.draftsOpen
+                    visible: store.view !== "calendar" && !root.mobile && !store.draftsOpen
                     Layout.preferredWidth: 1
                     Layout.fillHeight: true
                     color: Theme.borderSoft
@@ -179,7 +193,8 @@ Item {
 
                 MessageReaderPane {
                     id: messageReaderPane
-                    visible: !store.draftsOpen && (!root.mobile || root.mobilePage === "reader")
+                    visible: store.view !== "calendar" && !store.draftsOpen
+                        && (!root.mobile || root.mobilePage === "reader")
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
@@ -190,12 +205,22 @@ Item {
                 }
 
                 DraftsPane {
-                    visible: store.draftsOpen
+                    visible: store.view !== "calendar" && store.draftsOpen
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
                     onBackRequested: store.closeDrafts()
+                }
+
+                CalendarPane {
+                    id: calendarPane
+                    visible: store.view === "calendar"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    store: root.store
+                    mobile: root.mobile
+                    onBackRequested: root.openMail()
                 }
             }
 
@@ -256,6 +281,7 @@ Item {
                     root.navigationOpen = false
                     store.openDrafts()
                 }
+                onCalendarRequested: root.openCalendar()
                 onAccountSetupRequested: account => root.openAccountSetup(account)
                 Behavior on x { NumberAnimation { duration: 170; easing.type: Easing.OutCubic } }
             }

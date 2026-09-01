@@ -30,11 +30,13 @@ QtObject {
     property bool offline: false
     property bool draftsOpen: false
     property bool draftsLoading: false
+    property bool agendaLoading: false
+    property bool agendaMutationPending: false
     property bool accountsLoaded: false
     property bool initialLoadInFlight: false
     property bool automaticSyncStarted: false
     property string errorText: ""
-    property string view: "mail" // mail | compose
+    property string view: "mail" // mail | compose | calendar
     property var composeDraft: ({})
     property var attachmentSaveHandler: null
     property int accountsRequestGeneration: 0
@@ -46,6 +48,7 @@ QtObject {
     property int composeGeneration: 0
     property int draftsRequestGeneration: 0
     property int draftOpenGeneration: 0
+    property int agendaRequestGeneration: 0
 
     readonly property var activeAccount: findById(accounts, activeAccountId)
     readonly property var activeFolder: findById(folders, activeFolderId)
@@ -210,6 +213,180 @@ QtObject {
             }
             root.offline = false
             root.applySnapshot(result || ({}))
+        })
+    }
+
+    function openCalendar() {
+        draftsOpen = false
+        view = "calendar"
+        loadAgenda()
+    }
+
+    function openMailSurface() {
+        if (view === "compose") return
+        view = "mail"
+    }
+
+    function loadAgenda() {
+        if (!rpc.connected || agendaLoading) return
+        const generation = ++agendaRequestGeneration
+        agendaLoading = true
+        let remaining = 2
+        let firstError = null
+        function finish(error) {
+            if (generation !== root.agendaRequestGeneration) return
+            if (error) {
+                firstError = firstError || error
+            }
+            remaining -= 1
+            if (remaining > 0) return
+            root.agendaLoading = false
+            root.offline = !root.rpc.connected
+            if (firstError)
+                root.errorText = firstError.message || "Could not load the calendar"
+        }
+        rpc.request(rpc.methods.taskList, { includeDone: true }, function(result, error) {
+            if (generation !== root.agendaRequestGeneration) return
+            if (!error) root.tasks = root.normalizeArray(result, "tasks")
+            finish(error)
+        })
+        const now = new Date()
+        const rangeStart = new Date(now.getFullYear() - 1, 0, 1).getTime()
+        const rangeEnd = new Date(now.getFullYear() + 2, 0, 1).getTime()
+        rpc.request(rpc.methods.calendarList,
+            { startAt: rangeStart, endAt: rangeEnd }, function(result, error) {
+                if (generation !== root.agendaRequestGeneration) return
+                if (!error) root.events = root.normalizeArray(result, "events")
+                finish(error)
+            })
+    }
+
+    function syncAgenda(accountIdValue) {
+        if (!rpc.connected || agendaLoading) return
+        agendaLoading = true
+        errorText = ""
+        rpc.requestConnected(rpc.methods.agendaSync,
+            { accountId: String(accountIdValue || "") || null }, function(result, error) {
+                root.agendaLoading = false
+                if (error) {
+                    root.offline = !root.rpc.connected
+                    root.errorText = error.message || "Calendar synchronization failed"
+                    return
+                }
+                const errors = result && Array.isArray(result.errors) ? result.errors : []
+                if (errors.length > 0)
+                    root.errorText = String(errors[0].message || "One calendar account needs attention")
+                root.loadAgenda()
+            })
+    }
+
+    function agendaAccount(accountIdValue) {
+        return findById(accounts, String(accountIdValue || ""))
+    }
+
+    function agendaProvider(accountIdValue) {
+        const account = agendaAccount(accountIdValue)
+        return String(account && account.provider || "local").toLowerCase()
+    }
+
+    function createTask(payload, callback) {
+        const accountIdValue = String(payload && payload.account || "")
+        const provider = agendaProvider(accountIdValue)
+        const due = Number(payload && payload.dueAt || 0)
+        const task = {
+            id: "",
+            title: String(payload && payload.title || "").trim(),
+            description: String(payload && payload.description || "").trim(),
+            done: false,
+            dueAt: due > 0 ? due : null,
+            createdAt: Date.now(),
+            source: accountIdValue === "" ? "local"
+                : provider === "gmail" ? "google_tasks"
+                : (provider === "outlook" || provider === "hotmail"
+                    || provider === "microsoft365") ? "microsoft_todo" : provider,
+            externalId: "",
+            account: accountIdValue
+        }
+        if (task.title === "") {
+            if (typeof callback === "function")
+                callback(null, { message: "Task title is required" })
+            return
+        }
+        agendaMutationPending = true
+        rpc.requestConnected(rpc.methods.taskCreate, task, function(result, error) {
+            root.agendaMutationPending = false
+            if (error) root.errorText = error.message || "Could not create the task"
+            else root.loadAgenda()
+            if (typeof callback === "function") callback(result, error)
+        })
+    }
+
+    function completeTask(task, completed, callback) {
+        const id = String(task && task.id || "")
+        if (id === "") return
+        agendaMutationPending = true
+        rpc.requestConnected(rpc.methods.taskComplete,
+            { taskId: id, done: completed === true }, function(result, error) {
+                root.agendaMutationPending = false
+                if (error) root.errorText = error.message || "Could not update the task"
+                else root.loadAgenda()
+                if (typeof callback === "function") callback(result, error)
+            })
+    }
+
+    function deleteTask(task, callback) {
+        const id = String(task && task.id || "")
+        if (id === "") return
+        agendaMutationPending = true
+        rpc.requestConnected(rpc.methods.taskDelete, { taskId: id }, function(result, error) {
+            root.agendaMutationPending = false
+            if (error) root.errorText = error.message || "Could not delete the task"
+            else root.loadAgenda()
+            if (typeof callback === "function") callback(result, error)
+        })
+    }
+
+    function createCalendarEvent(payload, callback) {
+        const accountIdValue = String(payload && payload.calendarId || "")
+        const account = agendaAccount(accountIdValue)
+        const start = Number(payload && payload.startAt || 0)
+        const end = Number(payload && payload.endAt || 0)
+        const event = {
+            id: "",
+            externalId: "",
+            calendarId: accountIdValue === "" ? "local" : accountIdValue,
+            calendarName: accountIdValue === "" ? "Local"
+                : String(account && (account.displayName || account.address) || "Account"),
+            title: String(payload && payload.title || "").trim(),
+            description: String(payload && payload.description || "").trim(),
+            startAt: start,
+            endAt: Math.max(start, end),
+            allDay: payload && payload.allDay === true,
+            readOnly: false
+        }
+        if (event.title === "" || start <= 0 || end < start) {
+            if (typeof callback === "function")
+                callback(null, { message: "Choose a title and a valid event time" })
+            return
+        }
+        agendaMutationPending = true
+        rpc.requestConnected(rpc.methods.calendarCreate, event, function(result, error) {
+            root.agendaMutationPending = false
+            if (error) root.errorText = error.message || "Could not create the event"
+            else root.loadAgenda()
+            if (typeof callback === "function") callback(result, error)
+        })
+    }
+
+    function deleteCalendarEvent(event, callback) {
+        const id = String(event && event.id || "")
+        if (id === "") return
+        agendaMutationPending = true
+        rpc.requestConnected(rpc.methods.calendarDelete, { eventId: id }, function(result, error) {
+            root.agendaMutationPending = false
+            if (error) root.errorText = error.message || "Could not delete the event"
+            else root.loadAgenda()
+            if (typeof callback === "function") callback(result, error)
         })
     }
 
@@ -1026,6 +1203,9 @@ QtObject {
         function onConnectionLost() {
             root.offline = true
             root.initialLoadInFlight = false
+            ++root.agendaRequestGeneration
+            root.agendaLoading = false
+            root.agendaMutationPending = false
             root.automaticSyncStarted = false
             root.syncing = false
         }

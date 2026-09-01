@@ -33,6 +33,7 @@ pub mod method {
     pub const CALENDAR_CREATE: &str = "calendar.create";
     pub const CALENDAR_UPDATE: &str = "calendar.update";
     pub const CALENDAR_DELETE: &str = "calendar.delete";
+    pub const AGENDA_SYNC: &str = "agenda.sync";
     pub const SYNC_START: &str = "sync.start";
 }
 

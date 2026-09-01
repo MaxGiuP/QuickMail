@@ -113,6 +113,7 @@ cat >"$command_dir/qs" <<'EOF'
     printf '%s\n' "$@"
     printf 'MAILTO=%s\n' "${QUICKMAIL_MAILTO_URI:-}"
     printf 'OPEN_ACCOUNTS=%s\n' "${QUICKMAIL_OPEN_ACCOUNTS:-}"
+    printf 'OPEN_CALENDAR=%s\n' "${QUICKMAIL_OPEN_CALENDAR:-}"
 } >>"$QUICKMAIL_TEST_QS_LOG"
 if [ "${QUICKMAIL_TEST_QS_IPC_FAIL:-0}" = 1 ] && [ "${1:-}" = ipc ]; then
     exit 1
@@ -224,6 +225,16 @@ QUICKMAIL_TEST_QS_LOG=$accounts_log \
 grep -Fx accounts "$accounts_log" >/dev/null \
     || fail "running-client accounts IPC was not attempted"
 
+calendar_log=$test_root/qs-calendar-running.log
+PATH=$command_dir:/usr/bin:/bin \
+HOME=$test_root/home \
+XDG_RUNTIME_DIR=$runtime \
+QUICKMAIL_QML_DIR=$qml \
+QUICKMAIL_TEST_QS_LOG=$calendar_log \
+    "$project_dir/packaging/quickmail" --calendar
+grep -Fx calendar "$calendar_log" >/dev/null \
+    || fail "running-client calendar IPC was not attempted"
+
 stale_log=$test_root/qs-stale-window.log
 sleep 10 &
 stale_instance_pid=$!
@@ -289,6 +300,21 @@ if PATH=$command_dir:/usr/bin:/bin \
     "$project_dir/packaging/quickmail" --accounts unexpected >/dev/null 2>&1; then
     fail "launcher accepted extra arguments after --accounts"
 fi
+
+calendar_log=$test_root/qs-calendar-startup.log
+PATH=$command_dir:/usr/bin:/bin \
+HOME=$test_root/home \
+XDG_RUNTIME_DIR=$runtime \
+QUICKMAIL_QML_DIR=$qml \
+QUICKMAIL_TEST_QS_LOG=$calendar_log \
+QUICKMAIL_TEST_QS_IPC_FAIL=1 \
+    "$project_dir/packaging/quickmail" -- --calendar
+grep -Fx calendar "$calendar_log" >/dev/null \
+    || fail "calendar IPC was not attempted before launching a new instance"
+grep -Fx 'OPEN_CALENDAR=1' "$calendar_log" >/dev/null \
+    || fail "new QML process did not inherit QUICKMAIL_OPEN_CALENDAR=1"
+grep -Fx -- --no-duplicate "$calendar_log" >/dev/null \
+    || fail "calendar request did not launch QML after failed IPC"
 
 unhealthy_runtime=$test_root/unhealthy-runtime
 unhealthy_systemctl_log=$test_root/systemctl-unhealthy.log

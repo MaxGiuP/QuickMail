@@ -25,6 +25,16 @@ QtObject {
         draftDelete: "draft.delete",
         messageSend: "mail.send",
         attachmentDownload: "attachment.download",
+        taskList: "task.list",
+        taskCreate: "task.create",
+        taskUpdate: "task.update",
+        taskComplete: "task.complete",
+        taskDelete: "task.delete",
+        calendarList: "calendar.list",
+        calendarCreate: "calendar.create",
+        calendarUpdate: "calendar.update",
+        calendarDelete: "calendar.delete",
+        agendaSync: "agenda.sync",
         syncStart: "sync.start"
     })
     readonly property var events: ({

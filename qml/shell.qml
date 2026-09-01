@@ -95,6 +95,12 @@ ShellRoot {
             root.revealWindow()
         }
 
+        function calendar(): void {
+            mainWindow.cancelWindowClose()
+            mainWindow.openCalendar()
+            root.revealWindow()
+        }
+
         function compose(uri: string): bool {
             const accepted = mainWindow.startMailto(uri)
             if (accepted) root.revealWindow()
@@ -131,5 +137,7 @@ ShellRoot {
         if (mailtoUri !== "") mainWindow.startMailto(mailtoUri)
         if (String(Quickshell.env("QUICKMAIL_OPEN_ACCOUNTS") || "") === "1")
             mainWindow.openAccountSetup(null)
+        if (String(Quickshell.env("QUICKMAIL_OPEN_CALENDAR") || "") === "1")
+            mainWindow.openCalendar()
     }
 }

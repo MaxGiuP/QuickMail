@@ -111,6 +111,10 @@ pub(crate) struct GoaMailAccount {
     pub(crate) provider_type: String,
     pub(crate) email: String,
     pub(crate) mail_disabled: bool,
+    /// GOA service switches are independent. Keep them as metadata instead of
+    /// folding them into mail support so existing mail routing is unchanged.
+    pub(crate) calendar_disabled: bool,
+    pub(crate) tasks_disabled: bool,
     pub(crate) attention_needed: bool,
 }
 
@@ -194,6 +198,19 @@ impl GoaMailAccount {
             else {
                 continue;
             };
+            // `CalendarDisabled` and `TodoDisabled` are the current GOA
+            // property names. Accept historical/provider spelling variants,
+            // and fail closed when a daemon exposes none of them: a missing
+            // opt-in signal must not authorize direct calendar/task access.
+            let calendar_disabled = service_disabled(&[
+                account.get_property::<bool>("CalendarDisabled").await.ok(),
+                account.get_property::<bool>("CalendarsDisabled").await.ok(),
+            ]);
+            let tasks_disabled = service_disabled(&[
+                account.get_property::<bool>("TodoDisabled").await.ok(),
+                account.get_property::<bool>("TaskDisabled").await.ok(),
+                account.get_property::<bool>("TasksDisabled").await.ok(),
+            ]);
             return Ok(Some(Self {
                 id: path
                     .as_str()
@@ -205,6 +222,8 @@ impl GoaMailAccount {
                 provider_type,
                 email: mail_address,
                 mail_disabled: account.get_property("MailDisabled").await.unwrap_or(false),
+                calendar_disabled,
+                tasks_disabled,
                 attention_needed: account
                     .get_property("AttentionNeeded")
                     .await
@@ -311,6 +330,19 @@ impl GoaMailAccount {
             smtp_username,
         })
     }
+}
+
+/// Resolves alternate GOA property spellings without weakening an explicit
+/// disabled value. No recognized property is treated as disabled (fail closed).
+fn service_disabled(values: &[Option<bool>]) -> bool {
+    let mut recognized = false;
+    for value in values.iter().flatten() {
+        recognized = true;
+        if *value {
+            return true;
+        }
+    }
+    !recognized
 }
 
 fn is_goa_oauth_mail_account<'a>(interfaces: impl IntoIterator<Item = &'a str>) -> bool {
@@ -524,6 +556,14 @@ mod tests {
             preferred_mail_address("opaque", "also-opaque", "mail-id"),
             None
         );
+    }
+
+    #[test]
+    fn goa_service_toggles_accept_aliases_and_fail_closed() {
+        assert!(!service_disabled(&[Some(false)]));
+        assert!(!service_disabled(&[None, Some(false), None]));
+        assert!(service_disabled(&[Some(false), Some(true)]));
+        assert!(service_disabled(&[None, None, None]));
     }
 
     #[test]

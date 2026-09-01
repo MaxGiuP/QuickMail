@@ -14,6 +14,8 @@ boundaries advertised by each provider.
 | Archive/trash/star | IMAP flags and MOVE/copy fallback | Graph message update/move; legacy accounts use IMAP flags and MOVE/copy fallback | IMAP flags and MOVE/copy fallback |
 | Incremental identity | UIDVALIDITY and UID cursors | Immutable Graph message IDs and native conversation IDs; legacy accounts use UIDVALIDITY and UID cursors | UIDVALIDITY and UID cursors |
 | Attachments | Lazy IMAP retrieval | Lazy Graph file-attachment retrieval; legacy accounts use IMAP | Lazy IMAP retrieval |
+| Calendars | Google Calendar API, including writable-calendar flags | Microsoft Graph Calendar | Local QuickMail calendar only |
+| Tasks | Google Tasks; due dates are date-only | Microsoft To Do; due dates retain time | Local QuickMail tasks only |
 
 ## Brokered Google and Microsoft accounts
 
@@ -32,10 +34,24 @@ open GNOME Settings.
 
 GOA's Mail interface is a service marker as well as a protocol description, so
 QuickMail also checks the provider type before choosing a transport. The
-current GNOME `ms_graph` provider requests `Mail.ReadWrite` and `Mail.Send`
-permissions and supplies a GOA-managed OAuth2 access token; QuickMail uses that
-token only with `https://graph.microsoft.com/v1.0/`. See the [GNOME Microsoft
+current GNOME `ms_graph` provider requests mail, calendar, and task permissions
+and supplies a GOA-managed OAuth2 access token; QuickMail uses that token only
+with `https://graph.microsoft.com/v1.0/`. See the [GNOME Microsoft
 Graph provider source](https://github.com/GNOME/gnome-online-accounts/blob/master/src/goabackend/goamsgraphprovider.c).
+
+Calendar and task access follows GOA's independent service switches. QuickMail
+does not request a token or contact an API for a disabled Calendar or Tasks
+service. Google calls are restricted to the Google Calendar and Tasks API
+origins; Microsoft calls are restricted to Microsoft Graph. Google Tasks stores
+only the due date, so QuickMail deliberately hides the due-time control for a
+Google destination. Microsoft To Do and local tasks retain a due time.
+
+Remote mutations are written to the SQLite operation queue before any provider
+request. Successful provider data and operation completion commit atomically.
+Interrupted update, completion, and deletion operations can retry in
+account-scoped FIFO order after a short backoff. Interrupted creates are synced
+and surfaced instead of blindly replayed because the task APIs do not provide a
+portable idempotency key and a second POST could create a duplicate.
 
 The Graph path supports bounded folder and message paging, full text or HTML
 message reads, server search, read/star/move/archive/trash actions, new mail,

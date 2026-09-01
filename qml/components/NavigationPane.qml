@@ -11,6 +11,7 @@ Rectangle {
     property bool collapsed: false
     signal composeRequested()
     signal draftsRequested()
+    signal calendarRequested()
     signal accountSetupRequested(var account)
 
     color: Theme.surface
@@ -86,6 +87,63 @@ Rectangle {
             }
             ToolTip.visible: root.collapsed && hovered
             ToolTip.text: "Saved drafts"
+            ToolTip.delay: 500
+        }
+
+        Button {
+            id: calendarButton
+            Layout.fillWidth: true
+            Layout.preferredHeight: 40
+            flat: true
+            hoverEnabled: true
+            focusPolicy: Qt.StrongFocus
+            onClicked: root.calendarRequested()
+            contentItem: RowLayout {
+                spacing: 12
+                Text {
+                    text: "\ue935"
+                    color: root.store.view === "calendar" ? Theme.accent : Theme.textSecondary
+                    font.family: Theme.iconFont
+                    font.pixelSize: 20
+                }
+                Text {
+                    visible: !root.collapsed
+                    Layout.fillWidth: true
+                    text: "Calendar & tasks"
+                    color: Theme.text
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                }
+                Rectangle {
+                    visible: !root.collapsed
+                    implicitWidth: agendaCount.implicitWidth + 12
+                    implicitHeight: 22
+                    radius: 11
+                    color: Theme.accentSoft
+                    Text {
+                        id: agendaCount
+                        anchors.centerIn: parent
+                        text: String((Array.isArray(root.store.tasks)
+                            ? root.store.tasks.filter(task => !task.done).length : 0)
+                            + (Array.isArray(root.store.events) ? root.store.events.length : 0))
+                        color: Theme.accent
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                    }
+                }
+            }
+            background: Rectangle {
+                radius: Theme.radiusSmall
+                color: root.store.view === "calendar" ? Theme.surfaceSelected
+                    : calendarButton.hovered || calendarButton.visualFocus
+                        ? Theme.surfaceHover : "transparent"
+                border.width: calendarButton.visualFocus ? 1 : 0
+                border.color: Theme.accent
+            }
+            ToolTip.visible: root.collapsed && hovered
+            ToolTip.text: "Calendar & tasks"
             ToolTip.delay: 500
         }
 

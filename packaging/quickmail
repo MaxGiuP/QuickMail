@@ -138,20 +138,22 @@ fi
 
 mailto_uri=""
 open_accounts=0
+open_calendar=0
 case $# in
     0) ;;
     1)
         case "$1" in
             --accounts) open_accounts=1 ;;
+            --calendar) open_calendar=1 ;;
             [mM][aA][iI][lL][tT][oO]:*) mailto_uri=$1 ;;
             *)
-                echo "usage: quickmail [--accounts | mailto:address]" >&2
+                echo "usage: quickmail [--accounts | --calendar | mailto:address]" >&2
                 exit 2
                 ;;
         esac
         ;;
     *)
-        echo "usage: quickmail [--accounts | mailto:address]" >&2
+        echo "usage: quickmail [--accounts | --calendar | mailto:address]" >&2
         exit 2
         ;;
 esac
@@ -274,6 +276,16 @@ if [ "$open_accounts" -eq 1 ]; then
     fi
     QUICKMAIL_OPEN_ACCOUNTS=1
     export QUICKMAIL_OPEN_ACCOUNTS
+elif [ "$open_calendar" -eq 1 ]; then
+    if qs ipc -p "$qml_dir" call quickMail calendar >/dev/null 2>&1; then
+        instance_pid=$(running_instance_pid)
+        if wait_for_window; then
+            exit 0
+        fi
+        replace_stale_ui "$instance_pid" || exit 1
+    fi
+    QUICKMAIL_OPEN_CALENDAR=1
+    export QUICKMAIL_OPEN_CALENDAR
 elif [ -n "$mailto_uri" ]; then
     if qs ipc -p "$qml_dir" call quickMail compose "$mailto_uri" >/dev/null 2>&1; then
         instance_pid=$(running_instance_pid)

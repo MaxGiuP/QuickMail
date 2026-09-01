@@ -1,14 +1,24 @@
 [Desktop Entry]
 Type=Application
 Name=QuickMail
-GenericName=Email Client
-Comment=Fast local-first mail for Hyprland
+GenericName=Mail, Calendar and Tasks
+Comment=Mail, calendars and tasks in one focused workspace
 Exec=quickmail -- %u
 TryExec=quickmail
 Icon=mail-unread-symbolic
 Terminal=false
 StartupNotify=true
-Categories=Network;Email;
+Categories=Office;Email;Calendar;
+Keywords=mail;email;calendar;agenda;tasks;todo;gmail;outlook;
 MimeType=x-scheme-handler/mailto;
 StartupWMClass=org.quickshell
 SingleMainWindow=true
+Actions=Calendar;Accounts;
+
+[Desktop Action Calendar]
+Name=Open Calendar & Tasks
+Exec=quickmail --calendar
+
+[Desktop Action Accounts]
+Name=Manage Accounts
+Exec=quickmail --accounts

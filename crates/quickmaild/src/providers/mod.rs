@@ -5,6 +5,7 @@
 //! tests and allow the production transports to be replaced without changing
 //! synchronization semantics.
 
+pub(crate) mod agenda;
 pub(crate) mod auth;
 mod factory;
 pub(crate) mod gmail;

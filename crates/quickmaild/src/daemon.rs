@@ -12,11 +12,10 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
-    time::Duration,
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use quickmail_core::{
     AccountAddParams, AccountIdParams, AttachmentData, AttachmentDownloadParams,
     AttachmentDownloaded, CalendarEvent, CalendarListParams, DraftIdParams, DraftListParams,
@@ -38,17 +37,18 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
-    providers::MAX_MAIL_ATTACHMENT_BYTES,
+    providers::{MAX_MAIL_ATTACHMENT_BYTES, agenda::AgendaProvider},
     storage::{Database, StorageError},
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_REQUESTS: usize = 32;
-const CONNECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTION_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SYNC_PAGE_SIZE: u32 = 200;
 const SYNC_FLAG_RECONCILE_SIZE: u32 = 64;
 const MAX_SAFE_STYLESHEET_BYTES: usize = 256 * 1024;
+const AGENDA_RETRY_BACKOFF_MS: i64 = 30_000;
 
 const SAFE_CSS_PROPERTIES: &[&str] = &[
     "background-color",
@@ -1086,36 +1086,180 @@ impl Daemon {
                         .map_err(storage_rpc_error)?,
                 )
             }
-            method::TASK_CREATE | method::TASK_UPDATE => {
+            method::TASK_CREATE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
                 let mut task: Task = decode(params)?;
+                validate_task_mutation(&task)?;
                 if task.id.is_empty() {
                     task.id = Uuid::new_v4().to_string();
                 }
-                let revision = self
+                let mut operation_id = None;
+                let task = if task.account.trim().is_empty() {
+                    task.source = "local".into();
+                    task.external_id.clear();
+                    task
+                } else {
+                    let provider = self.agenda_provider_for_account(&task.account).await?;
+                    task.source = agenda_task_source(&provider).into();
+                    task.external_id.clear();
+                    let payload = serde_json::to_value(&task)
+                        .map_err(|error| RpcError::internal(error.to_string()))?;
+                    let (queued_operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_task_create", &task.account, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.create_task(&task).await {
+                        Ok(created) => {
+                            operation_id = Some(queued_operation_id);
+                            created
+                        }
+                        Err(error) => {
+                            self.record_agenda_operation_error(&queued_operation_id, &error, false)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                };
+                let revision = match operation_id {
+                    Some(operation_id) => {
+                        self.database
+                            .commit_agenda_task_upsert(&operation_id, &task)
+                            .await
+                    }
+                    None => self.database.upsert_task(&task).await,
+                }
+                .map_err(storage_rpc_error)?;
+                self.publish("agenda", "agenda.changed", revision);
+                Ok(json!({"task": task, "revision": revision}))
+            }
+            method::TASK_UPDATE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
+                let requested: Task = decode(params)?;
+                validate_task_mutation(&requested)?;
+                validate_agenda_id(&requested.id, "task ID")?;
+                let mut task = self
                     .database
-                    .upsert_task(&task)
+                    .get_task(&requested.id)
                     .await
                     .map_err(storage_rpc_error)?;
+                task.title = requested.title;
+                task.description = requested.description;
+                task.done = requested.done;
+                task.due_at = requested.due_at;
+                let mut operation_id = None;
+                let task = if is_remote_task(&task) {
+                    let provider = self.agenda_provider_for_account(&task.account).await?;
+                    let payload = serde_json::to_value(&task)
+                        .map_err(|error| RpcError::internal(error.to_string()))?;
+                    let (queued_operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_task_update", &task.account, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.update_task(&task).await {
+                        Ok(updated) => {
+                            operation_id = Some(queued_operation_id);
+                            updated
+                        }
+                        Err(error) => {
+                            self.record_agenda_operation_error(&queued_operation_id, &error, true)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                } else {
+                    task
+                };
+                let revision = match operation_id {
+                    Some(operation_id) => {
+                        self.database
+                            .commit_agenda_task_upsert(&operation_id, &task)
+                            .await
+                    }
+                    None => self.database.upsert_task(&task).await,
+                }
+                .map_err(storage_rpc_error)?;
                 self.publish("agenda", "agenda.changed", revision);
                 Ok(json!({"task": task, "revision": revision}))
             }
             method::TASK_COMPLETE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
                 let params: TaskCompleteParams = decode(params)?;
-                let revision = self
+                validate_agenda_id(&params.task_id, "task ID")?;
+                let mut task = self
                     .database
-                    .complete_task(&params.task_id, params.done)
+                    .get_task(&params.task_id)
                     .await
                     .map_err(storage_rpc_error)?;
+                task.done = params.done;
+                let revision = if is_remote_task(&task) {
+                    let provider = self.agenda_provider_for_account(&task.account).await?;
+                    let payload = json!({"taskId": task.id, "done": task.done});
+                    let (operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_task_complete", &task.account, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.complete_task(&task, params.done).await {
+                        Ok(updated) => self
+                            .database
+                            .commit_agenda_task_upsert(&operation_id, &updated)
+                            .await
+                            .map_err(storage_rpc_error)?,
+                        Err(error) => {
+                            self.record_agenda_operation_error(&operation_id, &error, true)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                } else {
+                    self.database
+                        .complete_task(&params.task_id, params.done)
+                        .await
+                        .map_err(storage_rpc_error)?
+                };
                 self.publish("agenda", "agenda.changed", revision);
                 Ok(json!({"revision": revision}))
             }
             method::TASK_DELETE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
                 let params: TaskIdParams = decode(params)?;
-                let revision = self
+                validate_agenda_id(&params.task_id, "task ID")?;
+                let task = self
                     .database
-                    .delete_task(&params.task_id)
+                    .get_task(&params.task_id)
                     .await
                     .map_err(storage_rpc_error)?;
+                let operation_id = if is_remote_task(&task) {
+                    let provider = self.agenda_provider_for_account(&task.account).await?;
+                    let payload = json!({"taskId": task.id});
+                    let (operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_task_delete", &task.account, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.delete_task(&task).await {
+                        Ok(()) | Err(ProviderError::NotFound) => {}
+                        Err(error) => {
+                            self.record_agenda_operation_error(&operation_id, &error, true)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                    Some(operation_id)
+                } else {
+                    None
+                };
+                let revision = match operation_id {
+                    Some(operation_id) => {
+                        self.database
+                            .commit_agenda_task_delete(&operation_id, &params.task_id)
+                            .await
+                    }
+                    None => self.database.delete_task(&params.task_id).await,
+                }
+                .map_err(storage_rpc_error)?;
                 self.publish("agenda", "agenda.changed", revision);
                 Ok(json!({"revision": revision}))
             }
@@ -1128,31 +1272,196 @@ impl Daemon {
                         .map_err(storage_rpc_error)?,
                 )
             }
-            method::CALENDAR_CREATE | method::CALENDAR_UPDATE => {
+            method::CALENDAR_CREATE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
                 let mut event: CalendarEvent = decode(params)?;
+                validate_event_mutation(&event)?;
                 if event.id.is_empty() {
                     event.id = Uuid::new_v4().to_string();
                 }
-                let revision = self
+                let mut operation_id = None;
+                let event = if let Some(account_id) =
+                    self.remote_event_create_account(&event.calendar_id).await?
+                {
+                    let provider = self.agenda_provider_for_account(&account_id).await?;
+                    event.calendar_id = account_id.clone();
+                    event.external_id.clear();
+                    event.read_only = false;
+                    let payload = serde_json::to_value(&event)
+                        .map_err(|error| RpcError::internal(error.to_string()))?;
+                    let (queued_operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_event_create", &account_id, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.create_event(&event).await {
+                        Ok(created) => {
+                            operation_id = Some(queued_operation_id);
+                            created
+                        }
+                        Err(error) => {
+                            self.record_agenda_operation_error(&queued_operation_id, &error, false)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                } else {
+                    if event.calendar_id.trim().is_empty() {
+                        event.calendar_id = "local".into();
+                    }
+                    if event.calendar_name.trim().is_empty() {
+                        event.calendar_name = "Local".into();
+                    }
+                    event.external_id.clear();
+                    event.read_only = false;
+                    event
+                };
+                let revision = match operation_id {
+                    Some(operation_id) => {
+                        self.database
+                            .commit_agenda_event_upsert(&operation_id, &event)
+                            .await
+                    }
+                    None => {
+                        self.database
+                            .upsert_events(std::slice::from_ref(&event))
+                            .await
+                    }
+                }
+                .map_err(storage_rpc_error)?;
+                self.publish("agenda", "agenda.changed", revision);
+                Ok(json!({"event": event, "revision": revision}))
+            }
+            method::CALENDAR_UPDATE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
+                let requested: CalendarEvent = decode(params)?;
+                validate_event_mutation(&requested)?;
+                validate_agenda_id(&requested.id, "event ID")?;
+                let mut event = self
                     .database
-                    .upsert_events(&[event.clone()])
+                    .get_event(&requested.id)
                     .await
                     .map_err(storage_rpc_error)?;
+                if event.read_only {
+                    return Err(RpcError::invalid_params("this calendar is read-only"));
+                }
+                event.title = requested.title;
+                event.description = requested.description;
+                event.start_at = requested.start_at;
+                event.end_at = requested.end_at;
+                event.all_day = requested.all_day;
+                let mut operation_id = None;
+                let event = if let Some(account_id) =
+                    self.remote_event_account(&event.calendar_id).await?
+                {
+                    let provider = self.agenda_provider_for_account(&account_id).await?;
+                    let payload = serde_json::to_value(&event)
+                        .map_err(|error| RpcError::internal(error.to_string()))?;
+                    let (queued_operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_event_update", &account_id, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.update_event(&event).await {
+                        Ok(updated) => {
+                            operation_id = Some(queued_operation_id);
+                            updated
+                        }
+                        Err(error) => {
+                            self.record_agenda_operation_error(&queued_operation_id, &error, true)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                } else {
+                    event
+                };
+                let revision = match operation_id {
+                    Some(operation_id) => {
+                        self.database
+                            .commit_agenda_event_upsert(&operation_id, &event)
+                            .await
+                    }
+                    None => {
+                        self.database
+                            .upsert_events(std::slice::from_ref(&event))
+                            .await
+                    }
+                }
+                .map_err(storage_rpc_error)?;
                 self.publish("agenda", "agenda.changed", revision);
                 Ok(json!({"event": event, "revision": revision}))
             }
             method::CALENDAR_DELETE => {
+                let _agenda_mutation = self.account_mutations.lock().await;
                 let params: EventIdParams = decode(params)?;
-                let revision = self
+                validate_agenda_id(&params.event_id, "event ID")?;
+                let event = self
                     .database
-                    .delete_event(&params.event_id)
+                    .get_event(&params.event_id)
                     .await
                     .map_err(storage_rpc_error)?;
+                if event.read_only {
+                    return Err(RpcError::invalid_params("this calendar is read-only"));
+                }
+                let operation_id = if let Some(account_id) =
+                    self.remote_event_account(&event.calendar_id).await?
+                {
+                    let provider = self.agenda_provider_for_account(&account_id).await?;
+                    let payload = json!({"eventId": event.id});
+                    let (operation_id, _) = self
+                        .database
+                        .queue_agenda_operation("agenda_event_delete", &account_id, &payload)
+                        .await
+                        .map_err(storage_rpc_error)?;
+                    match provider.delete_event(&event).await {
+                        Ok(()) | Err(ProviderError::NotFound) => {}
+                        Err(error) => {
+                            self.record_agenda_operation_error(&operation_id, &error, true)
+                                .await?;
+                            return Err(provider_rpc_error(error));
+                        }
+                    }
+                    Some(operation_id)
+                } else {
+                    None
+                };
+                let revision = match operation_id {
+                    Some(operation_id) => {
+                        self.database
+                            .commit_agenda_event_delete(&operation_id, &params.event_id)
+                            .await
+                    }
+                    None => self.database.delete_event(&params.event_id).await,
+                }
+                .map_err(storage_rpc_error)?;
                 self.publish("agenda", "agenda.changed", revision);
                 Ok(json!({"revision": revision}))
             }
+            method::AGENDA_SYNC => {
+                let params: SyncStartParams = decode_or_default(params)?;
+                let mut errors = self
+                    .recover_pending_agenda_operations(params.account_id.as_deref())
+                    .await?;
+                let (revision, mut sync_errors) = self
+                    .sync_selected_agendas(params.account_id.as_deref())
+                    .await?;
+                errors.append(&mut sync_errors);
+                self.publish("agenda", "agenda.changed", revision);
+                Ok(json!({
+                    "accepted": true,
+                    "revision": revision,
+                    "errors": errors,
+                }))
+            }
             method::SYNC_START => {
                 let params: SyncStartParams = decode_or_default(params)?;
+                for error in self
+                    .recover_pending_agenda_operations(params.account_id.as_deref())
+                    .await?
+                {
+                    warn!(error = %error, "agenda operation recovery needs attention");
+                }
                 let (revision, background_started) = self
                     .sync_selected_accounts(params.account_id.as_deref())
                     .await?;
@@ -1192,6 +1501,329 @@ impl Daemon {
                 message: format!("provider is not active for account {account_id}"),
                 data: None,
             })
+    }
+
+    async fn agenda_provider_for_account(
+        &self,
+        account_id: &str,
+    ) -> Result<AgendaProvider, RpcError> {
+        let account = self
+            .database
+            .list_accounts()
+            .await
+            .map_err(storage_rpc_error)?
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .ok_or_else(|| RpcError::invalid_params("unknown agenda account"))?;
+        AgendaProvider::discover(&account)
+            .await
+            .map_err(provider_rpc_error)?
+            .ok_or_else(|| RpcError {
+                code: -32007,
+                message: "this account does not support QuickMail calendar or tasks".into(),
+                data: None,
+            })
+    }
+
+    async fn remote_event_create_account(
+        &self,
+        calendar_id: &str,
+    ) -> Result<Option<String>, RpcError> {
+        if calendar_id.is_empty() || calendar_id == "local" {
+            return Ok(None);
+        }
+        let account = self
+            .database
+            .list_accounts()
+            .await
+            .map_err(storage_rpc_error)?
+            .into_iter()
+            .find(|account| account.id == calendar_id && agenda_account_supported(account))
+            .map(|account| account.id);
+        account
+            .map(Some)
+            .ok_or_else(|| RpcError::invalid_params("unknown remote calendar destination"))
+    }
+
+    async fn remote_event_account(&self, calendar_id: &str) -> Result<Option<String>, RpcError> {
+        Ok(self
+            .database
+            .list_accounts()
+            .await
+            .map_err(storage_rpc_error)?
+            .into_iter()
+            .filter(agenda_account_supported)
+            .filter(|account| {
+                calendar_id
+                    .strip_prefix(&account.id)
+                    .is_some_and(|suffix| suffix.starts_with(":agenda-calendar-v1."))
+            })
+            .max_by_key(|account| account.id.len())
+            .map(|account| account.id))
+    }
+
+    async fn sync_remote_agenda(
+        &self,
+        account: &quickmail_core::Account,
+    ) -> Result<Option<u64>, ProviderError> {
+        let _agenda_mutation = self.account_mutations.lock().await;
+        if self.removed_accounts.lock().await.contains(&account.id) {
+            return Ok(None);
+        }
+        let Some(provider) = AgendaProvider::discover(account).await? else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        let start = now - Duration::days(31);
+        let end = now + Duration::days(400);
+        let page = provider.sync(start, end).await?;
+        self.database
+            .replace_remote_agenda(&account.id, start, end, &page.tasks, &page.events)
+            .await
+            .map(Some)
+            .map_err(|error| {
+                ProviderError::Other(format!("could not cache remote agenda: {error}"))
+            })
+    }
+
+    async fn recover_pending_agenda_operations(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<Value>, RpcError> {
+        let _agenda_mutation = self.account_mutations.lock().await;
+        let operations = self
+            .database
+            .list_pending_agenda_operations(account_id)
+            .await
+            .map_err(storage_rpc_error)?;
+        let mut errors = Vec::new();
+        let mut blocked_accounts = HashSet::new();
+        let retry_cutoff = Utc::now().timestamp_millis() - AGENDA_RETRY_BACKOFF_MS;
+        for operation in operations {
+            if blocked_accounts.contains(&operation.account_id) {
+                continue;
+            }
+            if operation
+                .attempted_at
+                .is_some_and(|attempted_at| attempted_at > retry_cutoff)
+            {
+                blocked_accounts.insert(operation.account_id.clone());
+                continue;
+            }
+            let result: Result<u64, ProviderError> = if matches!(
+                operation.kind.as_str(),
+                "agenda_task_create" | "agenda_event_create"
+            ) {
+                // A create may have reached the provider before a crash. Blindly
+                // replaying it can duplicate a task/event because neither Tasks
+                // API offers a portable idempotency key. The following sync
+                // reconciles anything that was accepted remotely.
+                Err(ProviderError::Other(
+                    "an interrupted create was reconciled instead of replayed to avoid a duplicate"
+                        .into(),
+                ))
+            } else {
+                async {
+                    let account = self
+                        .database
+                        .list_accounts()
+                        .await
+                        .map_err(recovery_storage_error)?
+                        .into_iter()
+                        .find(|account| account.id == operation.account_id)
+                        .ok_or(ProviderError::NotFound)?;
+                    let provider = AgendaProvider::discover(&account).await?.ok_or_else(|| {
+                        ProviderError::Unsupported("calendar and tasks for this account".into())
+                    })?;
+                    match operation.kind.as_str() {
+                        "agenda_task_update" => {
+                            let task: Task = serde_json::from_value(operation.payload.clone())
+                                .map_err(|_| {
+                                    ProviderError::Other(
+                                        "queued task update has invalid data".into(),
+                                    )
+                                })?;
+                            let updated = provider.update_task(&task).await?;
+                            self.database
+                                .commit_agenda_task_upsert(&operation.id, &updated)
+                                .await
+                                .map_err(recovery_storage_error)
+                        }
+                        "agenda_task_complete" => {
+                            let task_id = operation
+                                .payload
+                                .get("taskId")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                ProviderError::Other("queued task completion has no task ID".into())
+                            })?;
+                            let done = operation
+                                .payload
+                                .get("done")
+                                .and_then(Value::as_bool)
+                                .ok_or_else(|| {
+                                    ProviderError::Other(
+                                        "queued task completion has no state".into(),
+                                    )
+                                })?;
+                            let mut task = self
+                                .database
+                                .get_task(task_id)
+                                .await
+                                .map_err(recovery_storage_error)?;
+                            task.done = done;
+                            let updated = provider.complete_task(&task, done).await?;
+                            self.database
+                                .commit_agenda_task_upsert(&operation.id, &updated)
+                                .await
+                                .map_err(recovery_storage_error)
+                        }
+                        "agenda_task_delete" => {
+                            let task_id = operation
+                                .payload
+                                .get("taskId")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                ProviderError::Other("queued task deletion has no task ID".into())
+                            })?;
+                            match self.database.get_task(task_id).await {
+                                Ok(task) => {
+                                    match provider.delete_task(&task).await {
+                                        Ok(()) | Err(ProviderError::NotFound) => {}
+                                        Err(error) => return Err(error),
+                                    }
+                                    self.database
+                                        .commit_agenda_task_delete(&operation.id, task_id)
+                                        .await
+                                        .map_err(recovery_storage_error)
+                                }
+                                Err(StorageError::NotFound) => {
+                                    self.database
+                                        .finish_operation(&operation.id, Ok(()))
+                                        .await
+                                        .map_err(recovery_storage_error)?;
+                                    self.database
+                                        .revision()
+                                        .await
+                                        .map_err(recovery_storage_error)
+                                }
+                                Err(error) => Err(recovery_storage_error(error)),
+                            }
+                        }
+                        "agenda_event_update" => {
+                            let event: CalendarEvent = serde_json::from_value(
+                                operation.payload.clone(),
+                            )
+                            .map_err(|_| {
+                                ProviderError::Other(
+                                    "queued calendar update has invalid data".into(),
+                                )
+                            })?;
+                            let updated = provider.update_event(&event).await?;
+                            self.database
+                                .commit_agenda_event_upsert(&operation.id, &updated)
+                                .await
+                                .map_err(recovery_storage_error)
+                        }
+                        "agenda_event_delete" => {
+                            let event_id = operation
+                                .payload
+                                .get("eventId")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                    ProviderError::Other(
+                                        "queued calendar deletion has no event ID".into(),
+                                    )
+                                })?;
+                            match self.database.get_event(event_id).await {
+                                Ok(event) => {
+                                    match provider.delete_event(&event).await {
+                                        Ok(()) | Err(ProviderError::NotFound) => {}
+                                        Err(error) => return Err(error),
+                                    }
+                                    self.database
+                                        .commit_agenda_event_delete(&operation.id, event_id)
+                                        .await
+                                        .map_err(recovery_storage_error)
+                                }
+                                Err(StorageError::NotFound) => {
+                                    self.database
+                                        .finish_operation(&operation.id, Ok(()))
+                                        .await
+                                        .map_err(recovery_storage_error)?;
+                                    self.database
+                                        .revision()
+                                        .await
+                                        .map_err(recovery_storage_error)
+                                }
+                                Err(error) => Err(recovery_storage_error(error)),
+                            }
+                        }
+                        _ => Err(ProviderError::Other(
+                            "queued agenda operation has an unsupported kind".into(),
+                        )),
+                    }
+                }
+                .await
+            };
+
+            match result {
+                Ok(revision) => self.publish("agenda", "agenda.changed", revision),
+                Err(error) => {
+                    let retryable = !matches!(
+                        operation.kind.as_str(),
+                        "agenda_task_create" | "agenda_event_create"
+                    ) && matches!(
+                        &error,
+                        ProviderError::Authentication(_) | ProviderError::Temporary(_)
+                    );
+                    let message = error.to_string();
+                    if retryable {
+                        self.database
+                            .defer_operation(&operation.id, &message)
+                            .await
+                            .map_err(storage_rpc_error)?;
+                        blocked_accounts.insert(operation.account_id.clone());
+                    } else {
+                        self.database
+                            .finish_operation(&operation.id, Err(message.clone()))
+                            .await
+                            .map_err(storage_rpc_error)?;
+                    }
+                    errors.push(json!({
+                        "accountId": operation.account_id,
+                        "operationId": operation.id,
+                        "message": message,
+                        "retryable": retryable,
+                    }));
+                }
+            }
+        }
+        Ok(errors)
+    }
+
+    async fn record_agenda_operation_error(
+        &self,
+        operation_id: &str,
+        error: &ProviderError,
+        safe_to_retry: bool,
+    ) -> Result<(), RpcError> {
+        if safe_to_retry
+            && matches!(
+                error,
+                ProviderError::Authentication(_) | ProviderError::Temporary(_)
+            )
+        {
+            self.database
+                .defer_operation(operation_id, &error.to_string())
+                .await
+                .map_err(storage_rpc_error)
+        } else {
+            self.database
+                .finish_operation(operation_id, Err(error.to_string()))
+                .await
+                .map_err(storage_rpc_error)
+        }
     }
 
     async fn provider_for_message(
@@ -1318,6 +1950,16 @@ impl Daemon {
                 self.background_syncing.lock().await.remove(&account_id);
                 return Err(provider_rpc_error(error));
             }
+            match self.sync_remote_agenda(provider.account()).await {
+                Ok(Some(revision)) => self.publish("agenda", "agenda.changed", revision),
+                Ok(None) => {}
+                Err(error) => {
+                    // Agenda grants are independent from mail. Keep a healthy
+                    // inbox usable while the UI surfaces the scoped calendar/
+                    // task authorization error on a mutation or later retry.
+                    warn!(%account_id, %error, "could not synchronize remote agenda");
+                }
+            }
             background_started |= self
                 .schedule_background_sync(provider, mailboxes.into_iter().skip(1).collect())
                 .await;
@@ -1326,6 +1968,41 @@ impl Daemon {
             self.database.revision().await.map_err(storage_rpc_error)?,
             background_started,
         ))
+    }
+
+    async fn sync_selected_agendas(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<(u64, Vec<Value>), RpcError> {
+        let all_accounts = self
+            .database
+            .list_accounts()
+            .await
+            .map_err(storage_rpc_error)?;
+        let accounts = if let Some(account_id) = account_id {
+            vec![
+                all_accounts
+                    .into_iter()
+                    .find(|account| account.id == account_id)
+                    .ok_or_else(|| RpcError::invalid_params("unknown agenda account"))?,
+            ]
+        } else {
+            all_accounts
+        };
+        let mut errors = Vec::new();
+        for account in accounts.into_iter().filter(agenda_account_supported) {
+            match self.sync_remote_agenda(&account).await {
+                Ok(Some(revision)) => self.publish("agenda", "agenda.changed", revision),
+                Ok(None) => {}
+                Err(error) if account_id.is_some() => return Err(provider_rpc_error(error)),
+                Err(error) => errors.push(json!({
+                    "accountId": account.id,
+                    "message": error.to_string(),
+                })),
+            }
+        }
+        let revision = self.database.revision().await.map_err(storage_rpc_error)?;
+        Ok((revision, errors))
     }
 
     async fn sync_mailbox_page(
@@ -1640,6 +2317,15 @@ fn storage_rpc_error(error: StorageError) -> RpcError {
             RpcError::invalid_params(error.to_string())
         }
         _ => RpcError::internal(error.to_string()),
+    }
+}
+
+fn recovery_storage_error(error: StorageError) -> ProviderError {
+    match error {
+        StorageError::NotFound => ProviderError::NotFound,
+        error => ProviderError::Temporary(format!(
+            "could not commit a recovered agenda operation: {error}"
+        )),
     }
 }
 
@@ -2077,9 +2763,63 @@ fn brokered_provider_family(provider: &str) -> Option<&'static str> {
     }
 }
 
+fn agenda_account_supported(account: &quickmail_core::Account) -> bool {
+    brokered_provider_family(&account.provider).is_some()
+        || account.protocol.eq_ignore_ascii_case("microsoft_graph")
+}
+
+fn agenda_task_source(provider: &AgendaProvider) -> &'static str {
+    if provider.supports_due_time() {
+        "microsoft_todo"
+    } else {
+        "google_tasks"
+    }
+}
+
+fn is_remote_task(task: &Task) -> bool {
+    !task.account.trim().is_empty()
+        && matches!(task.source.as_str(), "google_tasks" | "microsoft_todo")
+}
+
+fn validate_task_mutation(task: &Task) -> Result<(), RpcError> {
+    let title = task.title.trim();
+    if title.is_empty() || title.len() > 4_096 || title.contains(['\0', '\r', '\n']) {
+        return Err(RpcError::invalid_params("invalid task title"));
+    }
+    if task.description.len() > 64 * 1024 || task.description.contains('\0') {
+        return Err(RpcError::invalid_params("task description is too large"));
+    }
+    if task.account.len() > 512 || task.external_id.len() > 8 * 1024 {
+        return Err(RpcError::invalid_params("invalid task destination"));
+    }
+    Ok(())
+}
+
+fn validate_event_mutation(event: &CalendarEvent) -> Result<(), RpcError> {
+    let title = event.title.trim();
+    if title.is_empty() || title.len() > 4_096 || title.contains(['\0', '\r', '\n']) {
+        return Err(RpcError::invalid_params("invalid event title"));
+    }
+    if event.description.len() > 64 * 1024 || event.description.contains('\0') {
+        return Err(RpcError::invalid_params("event description is too large"));
+    }
+    if event.calendar_id.len() > 8 * 1024 || event.end_at <= event.start_at {
+        return Err(RpcError::invalid_params("invalid event time or calendar"));
+    }
+    Ok(())
+}
+
 fn validate_opaque_id(id: &str, name: &str) -> Result<(), RpcError> {
+    validate_id_with_limit(id, name, 512)
+}
+
+fn validate_agenda_id(id: &str, name: &str) -> Result<(), RpcError> {
+    validate_id_with_limit(id, name, 8 * 1024)
+}
+
+fn validate_id_with_limit(id: &str, name: &str, max_len: usize) -> Result<(), RpcError> {
     if id.is_empty()
-        || id.len() > 512
+        || id.len() > max_len
         || id
             .bytes()
             .any(|byte| byte == 0 || byte == b'/' || byte == b'\\')
@@ -3625,6 +4365,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_agenda_rpc_crud_round_trip_uses_stable_ids() {
+        let database = Database::open_in_memory().unwrap();
+        let daemon = Daemon::new(database.clone());
+        let mut topics = HashSet::new();
+        let created_at = Utc::now().timestamp_millis();
+        let result = daemon
+            .dispatch_inner(
+                method::TASK_CREATE,
+                json!({
+                    "id": "",
+                    "title": "Plan launch",
+                    "description": "Draft checklist",
+                    "done": false,
+                    "dueAt": null,
+                    "createdAt": created_at,
+                    "source": "local",
+                    "externalId": "",
+                    "account": ""
+                }),
+                &mut topics,
+            )
+            .await
+            .unwrap();
+        let mut task: Task = serde_json::from_value(result["task"].clone()).unwrap();
+        assert!(!task.id.is_empty());
+        task.title = "Plan release".into();
+        let stable_task_id = task.id.clone();
+        let result = daemon
+            .dispatch_inner(
+                method::TASK_UPDATE,
+                serde_json::to_value(&task).unwrap(),
+                &mut topics,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["task"]["id"], stable_task_id);
+        daemon
+            .dispatch_inner(
+                method::TASK_COMPLETE,
+                json!({"taskId": stable_task_id, "done": true}),
+                &mut topics,
+            )
+            .await
+            .unwrap();
+        assert!(database.get_task(&task.id).await.unwrap().done);
+        daemon
+            .dispatch_inner(method::TASK_DELETE, json!({"taskId": task.id}), &mut topics)
+            .await
+            .unwrap();
+        assert!(matches!(
+            database.get_task(&stable_task_id).await,
+            Err(StorageError::NotFound)
+        ));
+
+        let start_at = Utc::now().timestamp_millis();
+        let result = daemon
+            .dispatch_inner(
+                method::CALENDAR_CREATE,
+                json!({
+                    "id": "",
+                    "externalId": "",
+                    "calendarId": "local",
+                    "calendarName": "Local",
+                    "title": "Focus block",
+                    "description": "",
+                    "startAt": start_at,
+                    "endAt": start_at + 3_600_000,
+                    "allDay": false,
+                    "readOnly": false
+                }),
+                &mut topics,
+            )
+            .await
+            .unwrap();
+        let mut event: CalendarEvent = serde_json::from_value(result["event"].clone()).unwrap();
+        let stable_event_id = event.id.clone();
+        event.title = "Deep work".into();
+        let result = daemon
+            .dispatch_inner(
+                method::CALENDAR_UPDATE,
+                serde_json::to_value(&event).unwrap(),
+                &mut topics,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["event"]["id"], stable_event_id);
+        daemon
+            .dispatch_inner(
+                method::CALENDAR_DELETE,
+                json!({"eventId": stable_event_id}),
+                &mut topics,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            database.get_event(&event.id).await,
+            Err(StorageError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn interrupted_remote_create_is_failed_without_blind_replay() {
+        let database = Database::open_in_memory().unwrap();
+        database
+            .queue_agenda_operation(
+                "agenda_task_create",
+                "missing-account",
+                &json!({"id": "stable-task", "title": "Do not duplicate"}),
+            )
+            .await
+            .unwrap();
+        let daemon = Daemon::new(database.clone());
+        let errors = daemon
+            .recover_pending_agenda_operations(None)
+            .await
+            .unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("instead of replayed")
+        );
+        assert!(
+            database
+                .list_pending_agenda_operations(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_safe_agenda_failure_remains_in_the_durable_queue() {
+        let database = Database::open_in_memory().unwrap();
+        let (operation_id, _) = database
+            .queue_agenda_operation(
+                "agenda_task_update",
+                "account-1",
+                &json!({"id": "stable-task"}),
+            )
+            .await
+            .unwrap();
+        let daemon = Daemon::new(database.clone());
+        daemon
+            .record_agenda_operation_error(
+                &operation_id,
+                &ProviderError::Temporary("rate limited".into()),
+                true,
+            )
+            .await
+            .unwrap();
+        let queued = database
+            .list_pending_agenda_operations(Some("account-1"))
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, operation_id);
+        assert!(queued[0].attempted_at.is_some());
+    }
+
+    #[tokio::test]
     async fn idless_json_rpc_notification_is_dispatched_without_a_response() {
         let directory = tempdir().unwrap();
         let socket = private_socket_path(directory.path(), "notification.sock");
@@ -5101,6 +6003,15 @@ mod tests {
             std::fs::metadata(leaf).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn agenda_ids_allow_provider_encoded_values_without_relaxing_attachment_ids() {
+        let long_id = "a".repeat(4 * 1024);
+        assert!(validate_agenda_id(&long_id, "task ID").is_ok());
+        assert!(validate_opaque_id(&long_id, "attachmentId").is_err());
+        assert!(validate_agenda_id(&"a".repeat(8 * 1024 + 1), "event ID").is_err());
+        assert!(validate_agenda_id("unsafe/path", "task ID").is_err());
     }
 
     #[tokio::test]

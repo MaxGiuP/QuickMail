@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_THREAD_MESSAGES: usize = 100;
 
@@ -44,6 +44,15 @@ type Job = Box<dyn FnOnce(&mut Repository) + Send + 'static>;
 
 struct Repository {
     connection: Connection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingAgendaOperation {
+    pub id: String,
+    pub kind: String,
+    pub account_id: String,
+    pub payload: Value,
+    pub attempted_at: Option<i64>,
 }
 
 impl Database {
@@ -361,6 +370,11 @@ impl Database {
             .await
     }
 
+    pub async fn get_task(&self, id: &str) -> Result<Task, StorageError> {
+        let id = id.to_owned();
+        self.call(move |repository| repository.get_task(&id)).await
+    }
+
     pub async fn upsert_task(&self, task: &Task) -> Result<u64, StorageError> {
         let task = task.clone();
         self.call(move |repository| repository.upsert_task(&task))
@@ -388,6 +402,107 @@ impl Database {
     pub async fn delete_event(&self, id: &str) -> Result<u64, StorageError> {
         let id = id.to_owned();
         self.call(move |repository| repository.delete_event(&id))
+            .await
+    }
+
+    pub async fn get_event(&self, id: &str) -> Result<CalendarEvent, StorageError> {
+        let id = id.to_owned();
+        self.call(move |repository| repository.get_event(&id)).await
+    }
+
+    pub async fn replace_remote_agenda(
+        &self,
+        account_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        tasks: &[Task],
+        events: &[CalendarEvent],
+    ) -> Result<u64, StorageError> {
+        let account_id = account_id.to_owned();
+        let tasks = tasks.to_vec();
+        let events = events.to_vec();
+        self.call(move |repository| {
+            repository.replace_remote_agenda(&account_id, start, end, &tasks, &events)
+        })
+        .await
+    }
+
+    pub async fn queue_agenda_operation(
+        &self,
+        kind: &str,
+        account_id: &str,
+        payload: &Value,
+    ) -> Result<(String, u64), StorageError> {
+        let kind = kind.to_owned();
+        let account_id = account_id.to_owned();
+        let payload = payload.clone();
+        self.call(move |repository| repository.queue_agenda_operation(&kind, &account_id, &payload))
+            .await
+    }
+
+    pub(crate) async fn list_pending_agenda_operations(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<PendingAgendaOperation>, StorageError> {
+        let account_id = account_id.map(str::to_owned);
+        self.call(move |repository| {
+            repository.list_pending_agenda_operations(account_id.as_deref())
+        })
+        .await
+    }
+
+    pub async fn defer_operation(
+        &self,
+        operation_id: &str,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        let operation_id = operation_id.to_owned();
+        let error = error.to_owned();
+        self.call(move |repository| repository.defer_operation(&operation_id, &error))
+            .await
+    }
+
+    pub async fn commit_agenda_task_upsert(
+        &self,
+        operation_id: &str,
+        task: &Task,
+    ) -> Result<u64, StorageError> {
+        let operation_id = operation_id.to_owned();
+        let task = task.clone();
+        self.call(move |repository| repository.commit_agenda_task_upsert(&operation_id, &task))
+            .await
+    }
+
+    pub async fn commit_agenda_task_delete(
+        &self,
+        operation_id: &str,
+        task_id: &str,
+    ) -> Result<u64, StorageError> {
+        let operation_id = operation_id.to_owned();
+        let task_id = task_id.to_owned();
+        self.call(move |repository| repository.commit_agenda_task_delete(&operation_id, &task_id))
+            .await
+    }
+
+    pub async fn commit_agenda_event_upsert(
+        &self,
+        operation_id: &str,
+        event: &CalendarEvent,
+    ) -> Result<u64, StorageError> {
+        let operation_id = operation_id.to_owned();
+        let event = event.clone();
+        self.call(move |repository| repository.commit_agenda_event_upsert(&operation_id, &event))
+            .await
+    }
+
+    pub async fn commit_agenda_event_delete(
+        &self,
+        operation_id: &str,
+        event_id: &str,
+    ) -> Result<u64, StorageError> {
+        let operation_id = operation_id.to_owned();
+        let event_id = event_id.to_owned();
+        self.call(move |repository| repository.commit_agenda_event_delete(&operation_id, &event_id))
             .await
     }
 
@@ -615,6 +730,12 @@ impl Repository {
         let connection = &mut self.connection;
         let transaction = connection.transaction()?;
         remove_account_operations(&transaction, id)?;
+        transaction.execute("DELETE FROM tasks WHERE account=?1", [id])?;
+        transaction.execute(
+            "DELETE FROM events
+             WHERE substr(calendar_id, 1, length(?1) + 1) = ?1 || ':'",
+            [id],
+        )?;
         if transaction.execute("DELETE FROM accounts WHERE id=?1", [id])? == 0 {
             return Err(StorageError::NotFound);
         }
@@ -1167,6 +1288,19 @@ impl Repository {
         Ok(())
     }
 
+    fn defer_operation(&mut self, operation_id: &str, error: &str) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE operations
+             SET state='pending', attempted_at=?2, last_error=?3
+             WHERE id=?1 AND state='pending' AND kind LIKE 'agenda_%'",
+            params![operation_id, Utc::now().timestamp_millis(), error],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
     fn finish_mail_action(
         &mut self,
         operation_id: &str,
@@ -1217,6 +1351,209 @@ impl Repository {
         let revision = bump_revision(&transaction)?;
         transaction.commit()?;
         Ok((operation_id, revision))
+    }
+
+    fn queue_agenda_operation(
+        &mut self,
+        kind: &str,
+        account_id: &str,
+        payload: &Value,
+    ) -> Result<(String, u64), StorageError> {
+        const KINDS: &[&str] = &[
+            "agenda_task_create",
+            "agenda_task_update",
+            "agenda_task_complete",
+            "agenda_task_delete",
+            "agenda_event_create",
+            "agenda_event_update",
+            "agenda_event_delete",
+        ];
+        if !KINDS.contains(&kind) || account_id.trim().is_empty() || !payload.is_object() {
+            return Err(StorageError::InvalidData(
+                "invalid remote agenda operation".into(),
+            ));
+        }
+
+        let mut payload = payload.clone();
+        payload["accountId"] = Value::String(account_id.to_owned());
+        let transaction = self.connection.transaction()?;
+        let operation_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO operations (id, kind, payload_json, state, created_at)
+             VALUES (?1, ?2, ?3, 'pending', ?4)",
+            params![
+                operation_id,
+                kind,
+                serde_json::to_string(&payload)?,
+                Utc::now().timestamp_millis()
+            ],
+        )?;
+        let revision = bump_revision(&transaction)?;
+        transaction.commit()?;
+        Ok((operation_id, revision))
+    }
+
+    fn list_pending_agenda_operations(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<PendingAgendaOperation>, StorageError> {
+        const MAX_RECOVERY_OPERATIONS: usize = 128;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, kind, payload_json, attempted_at
+             FROM operations
+             WHERE state='pending' AND kind LIKE 'agenda_%'
+               AND (?2 IS NULL OR json_extract(payload_json, '$.accountId')=?2)
+             ORDER BY rowid
+             LIMIT ?1",
+        )?;
+        let rows =
+            statement.query_map(params![MAX_RECOVERY_OPERATIONS as i64, account_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?;
+        let mut operations = Vec::new();
+        for row in rows {
+            let (id, kind, payload_json, attempted_at) = row?;
+            let payload: Value = serde_json::from_str(&payload_json)?;
+            let operation_account_id = payload
+                .get("accountId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    StorageError::InvalidData("agenda operation has no account ID".into())
+                })?
+                .to_owned();
+            if account_id.is_none_or(|expected| expected == operation_account_id) {
+                operations.push(PendingAgendaOperation {
+                    id,
+                    kind,
+                    account_id: operation_account_id,
+                    payload,
+                    attempted_at,
+                });
+            }
+        }
+        Ok(operations)
+    }
+
+    fn commit_agenda_task_upsert(
+        &mut self,
+        operation_id: &str,
+        task: &Task,
+    ) -> Result<u64, StorageError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO tasks
+             (id, title, description, done, due_at, created_at, source, external_id, account)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET title=excluded.title,
+               description=excluded.description, done=excluded.done, due_at=excluded.due_at,
+               source=excluded.source, external_id=excluded.external_id, account=excluded.account",
+            params![
+                task.id,
+                task.title,
+                task.description,
+                task.done,
+                task.due_at.map(|time| time.timestamp_millis()),
+                task.created_at.timestamp_millis(),
+                task.source,
+                task.external_id,
+                task.account,
+            ],
+        )?;
+        finish_agenda_operation_in_transaction(
+            &transaction,
+            operation_id,
+            &[
+                "agenda_task_create",
+                "agenda_task_update",
+                "agenda_task_complete",
+            ],
+        )?;
+        let revision = bump_revision(&transaction)?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    fn commit_agenda_task_delete(
+        &mut self,
+        operation_id: &str,
+        task_id: &str,
+    ) -> Result<u64, StorageError> {
+        let transaction = self.connection.transaction()?;
+        if transaction.execute("DELETE FROM tasks WHERE id=?1", [task_id])? == 0 {
+            return Err(StorageError::NotFound);
+        }
+        finish_agenda_operation_in_transaction(
+            &transaction,
+            operation_id,
+            &["agenda_task_delete"],
+        )?;
+        let revision = bump_revision(&transaction)?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    fn commit_agenda_event_upsert(
+        &mut self,
+        operation_id: &str,
+        event: &CalendarEvent,
+    ) -> Result<u64, StorageError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO events
+             (id, external_id, calendar_id, calendar_name, title, description,
+              start_at, end_at, all_day, read_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id,
+              calendar_id=excluded.calendar_id, calendar_name=excluded.calendar_name,
+              title=excluded.title, description=excluded.description,
+              start_at=excluded.start_at, end_at=excluded.end_at,
+              all_day=excluded.all_day, read_only=excluded.read_only",
+            params![
+                event.id,
+                event.external_id,
+                event.calendar_id,
+                event.calendar_name,
+                event.title,
+                event.description,
+                event.start_at.timestamp_millis(),
+                event.end_at.timestamp_millis(),
+                event.all_day,
+                event.read_only,
+            ],
+        )?;
+        finish_agenda_operation_in_transaction(
+            &transaction,
+            operation_id,
+            &["agenda_event_create", "agenda_event_update"],
+        )?;
+        let revision = bump_revision(&transaction)?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    fn commit_agenda_event_delete(
+        &mut self,
+        operation_id: &str,
+        event_id: &str,
+    ) -> Result<u64, StorageError> {
+        let transaction = self.connection.transaction()?;
+        if transaction.execute("DELETE FROM events WHERE id=?1", [event_id])? == 0 {
+            return Err(StorageError::NotFound);
+        }
+        finish_agenda_operation_in_transaction(
+            &transaction,
+            operation_id,
+            &["agenda_event_delete"],
+        )?;
+        let revision = bump_revision(&transaction)?;
+        transaction.commit()?;
+        Ok(revision)
     }
 
     fn save_draft(
@@ -1293,6 +1630,18 @@ impl Repository {
         )?;
         let rows = statement.query_map([include_done], task_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn get_task(&self, id: &str) -> Result<Task, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT id, title, description, done, due_at, created_at, source, external_id, account
+                 FROM tasks WHERE id=?1",
+                [id],
+                task_from_row,
+            )
+            .optional()?
+            .ok_or(StorageError::NotFound)
     }
 
     fn upsert_task(&mut self, task: &Task) -> Result<u64, StorageError> {
@@ -1388,6 +1737,110 @@ impl Repository {
         if transaction.execute("DELETE FROM events WHERE id=?1", [id])? == 0 {
             return Err(StorageError::NotFound);
         }
+        let revision = bump_revision(&transaction)?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    fn get_event(&self, id: &str) -> Result<CalendarEvent, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT id, external_id, calendar_id, calendar_name, title, description,
+                        start_at, end_at, all_day, read_only
+                 FROM events WHERE id=?1",
+                [id],
+                event_from_row,
+            )
+            .optional()?
+            .ok_or(StorageError::NotFound)
+    }
+
+    fn replace_remote_agenda(
+        &mut self,
+        account_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        tasks: &[Task],
+        events: &[CalendarEvent],
+    ) -> Result<u64, StorageError> {
+        if tasks.iter().any(|task| task.account != account_id)
+            || events.iter().any(|event| {
+                !event
+                    .calendar_id
+                    .strip_prefix(account_id)
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+            })
+        {
+            return Err(StorageError::InvalidData(
+                "remote agenda page is not scoped to its account".into(),
+            ));
+        }
+
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM tasks
+             WHERE account=?1 AND source IN ('google_tasks', 'microsoft_todo')",
+            [account_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM events
+             WHERE substr(calendar_id, 1, length(?1) + 1) = ?1 || ':'
+               AND start_at < ?3 AND end_at >= ?2",
+            params![account_id, start.timestamp_millis(), end.timestamp_millis()],
+        )?;
+
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO tasks
+                 (id, title, description, done, due_at, created_at, source, external_id, account)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET title=excluded.title,
+                   description=excluded.description, done=excluded.done, due_at=excluded.due_at,
+                   source=excluded.source, external_id=excluded.external_id,
+                   account=excluded.account",
+            )?;
+            for task in tasks {
+                statement.execute(params![
+                    task.id,
+                    task.title,
+                    task.description,
+                    task.done,
+                    task.due_at.map(|time| time.timestamp_millis()),
+                    task.created_at.timestamp_millis(),
+                    task.source,
+                    task.external_id,
+                    task.account,
+                ])?;
+            }
+        }
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO events
+                 (id, external_id, calendar_id, calendar_name, title, description,
+                  start_at, end_at, all_day, read_only)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id,
+                  calendar_id=excluded.calendar_id, calendar_name=excluded.calendar_name,
+                  title=excluded.title, description=excluded.description,
+                  start_at=excluded.start_at, end_at=excluded.end_at,
+                  all_day=excluded.all_day, read_only=excluded.read_only",
+            )?;
+            for event in events {
+                statement.execute(params![
+                    event.id,
+                    event.external_id,
+                    event.calendar_id,
+                    event.calendar_name,
+                    event.title,
+                    event.description,
+                    event.start_at.timestamp_millis(),
+                    event.end_at.timestamp_millis(),
+                    event.all_day,
+                    event.read_only,
+                ])?;
+            }
+        }
+
         let revision = bump_revision(&transaction)?;
         transaction.commit()?;
         Ok(revision)
@@ -1673,7 +2126,7 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                account TEXT NOT NULL DEFAULT ''
              );
              CREATE UNIQUE INDEX idx_tasks_external_id
-               ON tasks(external_id) WHERE external_id <> '';
+               ON tasks(account, source, external_id) WHERE external_id <> '';
              CREATE INDEX idx_tasks_open_due ON tasks(done, due_at, id);
              CREATE TABLE events (
                id TEXT PRIMARY KEY, external_id TEXT NOT NULL DEFAULT '',
@@ -1696,10 +2149,10 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                message_json TEXT NOT NULL, updated_at INTEGER NOT NULL
              );
              CREATE INDEX idx_drafts_account_updated ON drafts(account_id, updated_at DESC, id);
-             PRAGMA user_version=6;
+             PRAGMA user_version=7;
              COMMIT;",
         )?;
-        version = 6;
+        version = 7;
     }
     if version == 1 {
         connection.execute_batch(
@@ -1776,6 +2229,27 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
              PRAGMA user_version=6;
              COMMIT;",
         )?;
+        version = 6;
+    }
+    if version == 6 {
+        // Provider-native task identifiers are only stable inside one account
+        // and task service. Scope the uniqueness rule accordingly so two
+        // Google or Microsoft accounts can cache the same opaque remote ID.
+        if table_has_column(connection, "tasks", "external_id")?
+            && table_has_column(connection, "tasks", "account")?
+            && table_has_column(connection, "tasks", "source")?
+        {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DROP INDEX IF EXISTS idx_tasks_external_id;
+                 CREATE UNIQUE INDEX idx_tasks_external_id
+                   ON tasks(account, source, external_id) WHERE external_id <> '';
+                 PRAGMA user_version=7;
+                 COMMIT;",
+            )?;
+        } else {
+            connection.pragma_update(None, "user_version", 7)?;
+        }
     }
     Ok(())
 }
@@ -2101,7 +2575,12 @@ fn remove_account_operations(
     let operations = {
         let mut statement = transaction.prepare(
             "SELECT id, kind, payload_json FROM operations
-             WHERE kind IN ('mail_action', 'mail_send')",
+             WHERE kind IN (
+               'mail_action', 'mail_send',
+               'agenda_task_create', 'agenda_task_update', 'agenda_task_complete',
+               'agenda_task_delete', 'agenda_event_create', 'agenda_event_update',
+               'agenda_event_delete'
+             )",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -2127,7 +2606,14 @@ fn operation_payload_belongs_to_account(kind: &str, payload_json: &str, account_
         return false;
     };
     match kind {
-        "mail_send" => ["accountId", "account_id"]
+        "mail_send"
+        | "agenda_task_create"
+        | "agenda_task_update"
+        | "agenda_task_complete"
+        | "agenda_task_delete"
+        | "agenda_event_create"
+        | "agenda_event_update"
+        | "agenda_event_delete" => ["accountId", "account_id"]
             .into_iter()
             .any(|field| payload.get(field).and_then(Value::as_str) == Some(account_id)),
         "mail_action" => ["messageIds", "message_ids"]
@@ -2149,6 +2635,34 @@ fn read_revision(connection: &Connection) -> Result<u64, StorageError> {
     revision
         .parse()
         .map_err(|_| StorageError::InvalidData("metadata revision is not an integer".into()))
+}
+
+fn finish_agenda_operation_in_transaction(
+    transaction: &Transaction<'_>,
+    operation_id: &str,
+    allowed_kinds: &[&str],
+) -> Result<(), StorageError> {
+    let operation: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT kind, state FROM operations WHERE id=?1",
+            [operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((kind, state)) = operation else {
+        return Err(StorageError::NotFound);
+    };
+    if !allowed_kinds.contains(&kind.as_str()) || state != "pending" {
+        return Err(StorageError::InvalidData(
+            "agenda operation cannot be committed in its current state".into(),
+        ));
+    }
+    transaction.execute(
+        "UPDATE operations
+         SET state='succeeded', attempted_at=?2, last_error=NULL WHERE id=?1",
+        params![operation_id, Utc::now().timestamp_millis()],
+    )?;
+    Ok(())
 }
 
 fn bump_revision(transaction: &Transaction<'_>) -> Result<u64, StorageError> {
@@ -2432,6 +2946,243 @@ mod tests {
 
         let updated = database.list_tasks(true).await.unwrap();
         assert_eq!(updated, vec![task]);
+    }
+
+    #[tokio::test]
+    async fn remote_agenda_replacement_is_account_scoped_and_keeps_local_tasks() {
+        let database = Database::open_in_memory().unwrap();
+        let start = Utc.timestamp_millis_opt(1_700_000_000_000).unwrap();
+        let end = start + Duration::days(30);
+        let local = Task {
+            id: "local-task".into(),
+            title: "Local".into(),
+            description: String::new(),
+            done: false,
+            due_at: Some(start),
+            created_at: start,
+            source: "local".into(),
+            external_id: String::new(),
+            account: String::new(),
+        };
+        database.upsert_task(&local).await.unwrap();
+
+        let remote = Task {
+            id: "account-1:task:remote-1".into(),
+            title: "Remote".into(),
+            description: String::new(),
+            done: false,
+            due_at: Some(start + Duration::days(1)),
+            created_at: start,
+            source: "google_tasks".into(),
+            external_id: "remote-1".into(),
+            account: "account-1".into(),
+        };
+        let event = CalendarEvent {
+            id: "account-1:event:remote-1".into(),
+            external_id: "remote-1".into(),
+            calendar_id: "account-1:primary".into(),
+            calendar_name: "Personal".into(),
+            title: "Remote event".into(),
+            description: String::new(),
+            start_at: start + Duration::days(2),
+            end_at: start + Duration::days(2) + Duration::hours(1),
+            all_day: false,
+            read_only: false,
+        };
+        database
+            .replace_remote_agenda(
+                "account-1",
+                start,
+                end,
+                std::slice::from_ref(&remote),
+                std::slice::from_ref(&event),
+            )
+            .await
+            .unwrap();
+        assert_eq!(database.get_task(&remote.id).await.unwrap(), remote);
+        assert_eq!(database.get_event(&event.id).await.unwrap(), event);
+
+        database
+            .replace_remote_agenda("account-1", start, end, &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(database.list_tasks(true).await.unwrap(), vec![local]);
+        assert!(matches!(
+            database.get_event("account-1:event:remote-1").await,
+            Err(StorageError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_agenda_mutations_are_queued_without_credentials() {
+        let database = Database::open_in_memory().unwrap();
+        let (operation_id, _) = database
+            .queue_agenda_operation(
+                "agenda_task_create",
+                "account-1",
+                &json!({"id": "stable-task", "title": "Plan trip"}),
+            )
+            .await
+            .unwrap();
+        let stored: (String, String, String) = database
+            .call(move |repository| {
+                repository
+                    .connection
+                    .query_row(
+                        "SELECT kind, payload_json, state FROM operations WHERE id=?1",
+                        [operation_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(Into::into)
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.0, "agenda_task_create");
+        assert_eq!(stored.2, "pending");
+        let payload: Value = serde_json::from_str(&stored.1).unwrap();
+        assert_eq!(payload["accountId"], "account-1");
+        assert_eq!(payload["id"], "stable-task");
+        assert!(!stored.1.to_ascii_lowercase().contains("token"));
+    }
+
+    #[tokio::test]
+    async fn remote_agenda_cache_and_operation_completion_commit_atomically() {
+        let database = Database::open_in_memory().unwrap();
+        let task = Task {
+            id: "account-1:agenda-task-v1.stable".into(),
+            title: "Plan trip".into(),
+            description: "Book train".into(),
+            done: false,
+            due_at: None,
+            created_at: Utc
+                .timestamp_millis_opt(Utc::now().timestamp_millis())
+                .single()
+                .unwrap(),
+            source: "google_tasks".into(),
+            external_id: "remote-1".into(),
+            account: "account-1".into(),
+        };
+        let (wrong_operation_id, _) = database
+            .queue_agenda_operation(
+                "agenda_event_create",
+                "account-1",
+                &json!({"id": "event-1"}),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            database
+                .commit_agenda_task_upsert(&wrong_operation_id, &task)
+                .await,
+            Err(StorageError::InvalidData(_))
+        ));
+        assert!(matches!(
+            database.get_task(&task.id).await,
+            Err(StorageError::NotFound)
+        ));
+
+        let (create_operation_id, _) = database
+            .queue_agenda_operation(
+                "agenda_task_create",
+                "account-1",
+                &serde_json::to_value(&task).unwrap(),
+            )
+            .await
+            .unwrap();
+        database
+            .commit_agenda_task_upsert(&create_operation_id, &task)
+            .await
+            .unwrap();
+        assert_eq!(database.get_task(&task.id).await.unwrap(), task);
+
+        let (delete_operation_id, _) = database
+            .queue_agenda_operation(
+                "agenda_task_delete",
+                "account-1",
+                &json!({"taskId": task.id}),
+            )
+            .await
+            .unwrap();
+        database
+            .commit_agenda_task_delete(&delete_operation_id, &task.id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            database.get_task(&task.id).await,
+            Err(StorageError::NotFound)
+        ));
+
+        let operation_ids = [wrong_operation_id, create_operation_id, delete_operation_id];
+        let states: Vec<String> = database
+            .call(move |repository| {
+                operation_ids
+                    .iter()
+                    .map(|operation_id| {
+                        repository
+                            .connection
+                            .query_row(
+                                "SELECT state FROM operations WHERE id=?1",
+                                [operation_id],
+                                |row| row.get(0),
+                            )
+                            .map_err(Into::into)
+                    })
+                    .collect()
+            })
+            .await
+            .unwrap();
+        assert_eq!(states, ["pending", "succeeded", "succeeded"]);
+    }
+
+    #[tokio::test]
+    async fn pending_agenda_operations_keep_insertion_order_and_account_scope() {
+        let database = Database::open_in_memory().unwrap();
+        let (first, _) = database
+            .queue_agenda_operation("agenda_task_update", "account-1", &json!({"id": "first"}))
+            .await
+            .unwrap();
+        let (second, _) = database
+            .queue_agenda_operation(
+                "agenda_task_complete",
+                "account-1",
+                &json!({"taskId": "first", "done": true}),
+            )
+            .await
+            .unwrap();
+        let (other, _) = database
+            .queue_agenda_operation(
+                "agenda_event_delete",
+                "account-2",
+                &json!({"eventId": "event-2"}),
+            )
+            .await
+            .unwrap();
+
+        database
+            .defer_operation(&first, "temporary provider failure")
+            .await
+            .unwrap();
+        let account_operations = database
+            .list_pending_agenda_operations(Some("account-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            account_operations
+                .iter()
+                .map(|operation| operation.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), second.as_str()]
+        );
+        assert!(account_operations[0].attempted_at.is_some());
+
+        let all_operations = database.list_pending_agenda_operations(None).await.unwrap();
+        assert_eq!(
+            all_operations
+                .iter()
+                .map(|operation| operation.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), second.as_str(), other.as_str()]
+        );
     }
 
     #[tokio::test]
