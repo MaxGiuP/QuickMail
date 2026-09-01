@@ -246,8 +246,18 @@ ApplicationWindow {
         interval: 100
         running: true
         repeat: false
-        onTriggered: window.expect(mainWindow.mobile,
-            "smoke fixture did not enter the responsive layout")
+        onTriggered: {
+            window.expect(mainWindow.mobile,
+                "smoke fixture did not enter the responsive layout")
+            window.expect(mainWindow.navigationRailVisible
+                    && mainWindow.navigationRailWidth >= 60,
+                "compressed layout hid or collapsed the navigation rail")
+            window.expect(mainWindow.mailListLeftEdge
+                    >= mainWindow.navigationRailWidth,
+                "compressed mail content covered the navigation rail")
+            window.expect(!mainWindow.draftsBackButtonVisible,
+                "persistent navigation left the drafts title offset by a back button")
+        }
     }
     Timer {
         interval: 125

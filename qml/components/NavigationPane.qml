@@ -210,6 +210,8 @@ Rectangle {
 
                 Layout.fillWidth: true
                 Layout.preferredHeight: 40
+                leftPadding: 10
+                rightPadding: 10
                 flat: true
                 hoverEnabled: true
                 focusPolicy: Qt.StrongFocus
@@ -217,6 +219,7 @@ Rectangle {
                 contentItem: RowLayout {
                     spacing: 12
                     Text {
+                        objectName: "savedDraftsIcon"
                         text: Theme.icon("drafts")
                         color: root.store.draftsOpen ? Theme.accent : Theme.textSecondary
                         font.family: Theme.iconFont
@@ -303,6 +306,7 @@ Rectangle {
                         anchors.rightMargin: 10
                         spacing: 12
                         Text {
+                            objectName: "folderIcon"
                             text: Theme.icon(folderRow.folderIcon)
                             color: folderList.currentIndex === folderRow.index
                                 ? Theme.accent : Theme.textSecondary

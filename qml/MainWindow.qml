@@ -29,6 +29,10 @@ Item {
     readonly property string composeRecipientText: composePane.recipientText
     readonly property string composeSubjectText: composePane.subjectText
     readonly property string composeBodyText: composePane.editorBodyText
+    readonly property bool navigationRailVisible: navigationRail.visible
+    readonly property real navigationRailWidth: navigationRail.width
+    readonly property real mailListLeftEdge: messageListPane.x
+    readonly property bool draftsBackButtonVisible: draftsPane.backButtonVisible
     readonly property string renderedMessageHtml: messageReaderPane.renderedBodyHtml
     property bool windowClosePending: false
     readonly property bool safeToReplace: composePane.safeToReplace
@@ -154,9 +158,13 @@ Item {
                 enabled: !composePane.open || composePane.minimized
 
                 NavigationPane {
-                    visible: !root.mobile
+                    id: navigationRail
+
+                    visible: true
                     Layout.preferredWidth: root.navigationCollapsed ? 64
                         : root.medium ? 176 : 224
+                    Layout.minimumWidth: Layout.preferredWidth
+                    Layout.maximumWidth: Layout.preferredWidth
                     Layout.fillHeight: true
                     store: root.store
                     collapsed: root.navigationCollapsed
@@ -168,8 +176,10 @@ Item {
                 }
 
                 Rectangle {
-                    visible: !root.mobile
+                    visible: true
                     Layout.preferredWidth: 1
+                    Layout.minimumWidth: 1
+                    Layout.maximumWidth: 1
                     Layout.fillHeight: true
                     color: Theme.borderSoft
                 }
@@ -208,11 +218,14 @@ Item {
                 }
 
                 DraftsPane {
+                    id: draftsPane
+
                     visible: store.view !== "calendar" && store.draftsOpen
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
+                    persistentNavigation: navigationRail.visible
                     onBackRequested: store.closeDrafts()
                 }
 

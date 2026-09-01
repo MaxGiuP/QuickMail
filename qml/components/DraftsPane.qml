@@ -9,7 +9,9 @@ Rectangle {
     id: root
     required property var store
     property bool mobile: false
+    property bool persistentNavigation: false
     property var pendingDelete: null
+    readonly property bool backButtonVisible: backButton.visible
     signal backRequested()
 
     color: Theme.canvas
@@ -50,7 +52,9 @@ Rectangle {
             Layout.rightMargin: Theme.space4
             spacing: 8
             IconButton {
-                visible: root.mobile
+                id: backButton
+
+                visible: root.mobile && !root.persistentNavigation
                 iconName: "back"
                 tip: "Back to mail"
                 onClicked: root.backRequested()
