@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalServer>
@@ -250,6 +251,7 @@ int main(int argc, char *argv[])
     QGuiApplication::setDesktopFileName(QString::fromLatin1(kApplicationId));
 
     QGuiApplication application(argc, argv);
+    QGuiApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("mail-unread")));
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("QuickMail standalone Qt interface"));
     parser.addHelpOption();

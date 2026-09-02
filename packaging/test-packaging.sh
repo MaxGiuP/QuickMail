@@ -29,6 +29,9 @@ fi
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "$project_dir/packaging/io.github.MaxGiuP.QuickMail.desktop"
 fi
+grep -Fx 'Icon=mail-unread' \
+    "$project_dir/packaging/io.github.MaxGiuP.QuickMail.desktop" >/dev/null \
+    || fail "desktop entry does not use the light/dark adaptive mail icon"
 
 fake_bin=$test_root/fake-build
 stage=$test_root/stage
