@@ -18,6 +18,7 @@ TextArea {
     font.pixelSize: 14
     wrapMode: TextEdit.Wrap
     selectByMouse: true
+    persistentSelection: true
     background: null
 
     function escapeHtml(value) {
@@ -134,5 +135,12 @@ TextArea {
 
     onTextChanged: {
         if (!internalUpdate && activeFocus) userEdited()
+    }
+
+    TextContextMenuArea {
+        objectName: "composeTextContextArea"
+        anchors.fill: parent
+        editor: root
+        editable: true
     }
 }

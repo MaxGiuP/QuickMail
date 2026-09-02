@@ -1046,6 +1046,7 @@ Rectangle {
                     wrapMode: TextEdit.Wrap
                     readOnly: true
                     selectByMouse: true
+                    persistentSelection: true
                     color: Theme.text
                     selectionColor: Theme.accentSoft
                     selectedTextColor: Theme.text
@@ -1055,6 +1056,13 @@ Rectangle {
                     padding: 0
                     implicitHeight: contentHeight
                     onContentHeightChanged: root.deferZoomScrollRestore()
+
+                    TextContextMenuArea {
+                        objectName: "plainTextContextArea"
+                        anchors.fill: parent
+                        editor: plainBody
+                        editable: false
+                    }
                 }
 
                 ColumnLayout {

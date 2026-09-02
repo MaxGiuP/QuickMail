@@ -685,6 +685,13 @@ Item {
             font.family: "sans-serif"
             font.pixelSize: 15
             onLinkActivated: link => root.requestExternalOpen(link)
+
+            TextContextMenuArea {
+                objectName: "htmlTextContextArea"
+                anchors.fill: parent
+                editor: nativeRenderer
+                editable: false
+            }
         }
     }
 

@@ -30,7 +30,7 @@ find "$project_dir/qml" -name '*.qml' -print0 \
 cp -R "$project_dir/qml/." "$test_runtime_dir/"
 cp "$project_dir/qml/tests/SmokeHarness.qml" "$test_runtime_dir/shell.qml"
 
-for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke MessageContextMenuSmoke MessageNavigationSmoke ReaderZoomSmoke ThreadPresentationSmoke ThemeModeSmoke SettingsMenuSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke WindowCloseGuardSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke AgendaComposerLayoutSmoke NavigationHierarchySmoke AttachmentViewerSmoke MotionSmoke
+for smoke in UiSmoke StoreContractSmoke PlainTextSecuritySmoke HtmlRenderSmoke MessageTextLayoutSmoke MessageContextMenuSmoke TextSelectionContextSmoke MessageNavigationSmoke ReaderZoomSmoke ThreadPresentationSmoke ThemeModeSmoke SettingsMenuSmoke SenderAvatarSmoke ReaderAvatarLazySmoke WindowLifecycleSmoke WindowCloseGuardSmoke ComposeFormattingSmoke SettingsWriteSmoke SettingsReadSmoke CalendarPaneSmoke AgendaComposerLayoutSmoke NavigationHierarchySmoke AttachmentViewerSmoke MotionSmoke
 do
   smoke_log=$(mktemp "${TMPDIR:-/tmp}/quickmail-qml-smoke.XXXXXX")
   smoke_timezone=${TZ:-UTC}
@@ -47,7 +47,7 @@ do
     exit 1
   fi
 
-  if grep -Eq 'QML SMOKE TEST FAILED|UI SMOKE TEST FAILED|STORE CONTRACT TEST FAILED|PLAIN TEXT SECURITY TEST FAILED|HTML RENDER TEST FAILED|MESSAGE TEXT LAYOUT TEST FAILED|MESSAGE CONTEXT MENU TEST FAILED|MESSAGE NAVIGATION TEST FAILED|READER ZOOM TEST FAILED|THEME MODE TEST FAILED|SETTINGS MENU TEST FAILED|SENDER AVATAR TEST FAILED|READER AVATAR LAZY TEST FAILED|WINDOW LIFECYCLE TEST FAILED|WINDOW CLOSE GUARD TEST FAILED|COMPOSE FORMATTING TEST FAILED|SETTINGS PERSISTENCE TEST FAILED|CALENDAR PANE TEST FAILED|AGENDA COMPOSER LAYOUT TEST FAILED|ATTACHMENT VIEWER TEST FAILED|MOTION TEST FAILED|Binding loop detected|Type .* unavailable|Cannot assign to non-existent|ReferenceError:|TypeError:|RangeError:|SyntaxError:|is not defined|Failed to load component|Failed to load configuration' "$smoke_log"; then
+  if grep -Eq 'QML SMOKE TEST FAILED|UI SMOKE TEST FAILED|STORE CONTRACT TEST FAILED|PLAIN TEXT SECURITY TEST FAILED|HTML RENDER TEST FAILED|MESSAGE TEXT LAYOUT TEST FAILED|MESSAGE CONTEXT MENU TEST FAILED|TEXT CONTEXT MENU TEST FAILED|MESSAGE NAVIGATION TEST FAILED|READER ZOOM TEST FAILED|THEME MODE TEST FAILED|SETTINGS MENU TEST FAILED|SENDER AVATAR TEST FAILED|READER AVATAR LAZY TEST FAILED|WINDOW LIFECYCLE TEST FAILED|WINDOW CLOSE GUARD TEST FAILED|COMPOSE FORMATTING TEST FAILED|SETTINGS PERSISTENCE TEST FAILED|CALENDAR PANE TEST FAILED|AGENDA COMPOSER LAYOUT TEST FAILED|ATTACHMENT VIEWER TEST FAILED|MOTION TEST FAILED|Binding loop detected|Type .* unavailable|Cannot assign to non-existent|ReferenceError:|TypeError:|RangeError:|SyntaxError:|is not defined|Failed to load component|Failed to load configuration' "$smoke_log"; then
     cat "$smoke_log" >&2
     rm -f "$smoke_log"
     exit 1
