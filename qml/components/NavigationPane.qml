@@ -12,6 +12,7 @@ Rectangle {
     readonly property bool calendarParentSelected: store.view === "calendar"
     readonly property bool mailParentSelected: !calendarParentSelected
     readonly property bool mailNavigationVisible: mailNavigation.visible
+    readonly property int parentLabelHoverDelay: 550
     signal mailRequested()
     signal composeRequested()
     signal draftsRequested()
@@ -77,6 +78,7 @@ Rectangle {
 
                 Button {
                     id: mailParentButton
+                    objectName: "mailParentButton"
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -97,23 +99,6 @@ Rectangle {
                                 ? Theme.accentSoftText : Theme.textSecondary
                             font.family: Theme.iconFont
                             font.pixelSize: 19
-
-                            Behavior on color {
-                                enabled: Theme.animationsEnabled
-                                ColorAnimation {
-                                    duration: Theme.motionFast
-                                    easing.type: Easing.OutCubic
-                                }
-                            }
-                        }
-                        Text {
-                            visible: !root.collapsed
-                            text: "Mail"
-                            color: root.mailParentSelected
-                                ? Theme.accentSoftText : Theme.textSecondary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 12
-                            font.weight: Font.DemiBold
 
                             Behavior on color {
                                 enabled: Theme.animationsEnabled
@@ -144,13 +129,14 @@ Rectangle {
                         }
                     }
 
-                    ToolTip.visible: root.collapsed && hovered
+                    ToolTip.visible: hovered
                     ToolTip.text: "Mail"
-                    ToolTip.delay: 500
+                    ToolTip.delay: root.parentLabelHoverDelay
                 }
 
                 Button {
                     id: calendarParentButton
+                    objectName: "calendarParentButton"
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -171,23 +157,6 @@ Rectangle {
                                 ? Theme.accentSoftText : Theme.textSecondary
                             font.family: Theme.iconFont
                             font.pixelSize: 19
-
-                            Behavior on color {
-                                enabled: Theme.animationsEnabled
-                                ColorAnimation {
-                                    duration: Theme.motionFast
-                                    easing.type: Easing.OutCubic
-                                }
-                            }
-                        }
-                        Text {
-                            visible: !root.collapsed
-                            text: "Calendar"
-                            color: root.calendarParentSelected
-                                ? Theme.accentSoftText : Theme.textSecondary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 12
-                            font.weight: Font.DemiBold
 
                             Behavior on color {
                                 enabled: Theme.animationsEnabled
@@ -218,9 +187,9 @@ Rectangle {
                         }
                     }
 
-                    ToolTip.visible: root.collapsed && hovered
+                    ToolTip.visible: hovered
                     ToolTip.text: "Calendar"
-                    ToolTip.delay: 500
+                    ToolTip.delay: root.parentLabelHoverDelay
                 }
             }
         }

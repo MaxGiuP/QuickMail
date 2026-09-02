@@ -39,6 +39,14 @@ ApplicationWindow {
         return icon.mapToItem(navigationPane, icon.width / 2, icon.height / 2).x
     }
 
+    function descendantTexts(object, result) {
+        if (!object) return
+        if (typeof object.text === "string") result.push(object.text)
+        const children = object.children || []
+        for (let index = 0; index < children.length; ++index)
+            descendantTexts(children[index], result)
+    }
+
     QtObject {
         id: fakeStore
 
@@ -94,6 +102,22 @@ ApplicationWindow {
                 "Mail was not the selected top-level destination")
             window.expect(navigation.mailNavigationVisible,
                 "Mail controls were not nested beneath Mail")
+            window.expect(navigation.parentLabelHoverDelay >= 400,
+                "top-level labels no longer use an intentional hover delay")
+
+            const mailButtons = window.named(navigation, "mailParentButton")
+            const calendarButtons = window.named(navigation, "calendarParentButton")
+            window.expect(mailButtons.length === 1 && calendarButtons.length === 1,
+                "top-level navigation buttons were not exposed for inspection")
+            const mailButtonTexts = []
+            const calendarButtonTexts = []
+            if (mailButtons.length > 0)
+                window.descendantTexts(mailButtons[0].contentItem, mailButtonTexts)
+            if (calendarButtons.length > 0)
+                window.descendantTexts(calendarButtons[0].contentItem, calendarButtonTexts)
+            window.expect(mailButtonTexts.indexOf("Mail") < 0
+                    && calendarButtonTexts.indexOf("Calendar") < 0,
+                "top-level labels remained inline instead of icon-only")
 
             const expandedDraftsCenter = window.iconCenter(
                 navigation, "savedDraftsIcon")
