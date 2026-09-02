@@ -11,9 +11,13 @@ StartupNotify=true
 Categories=Office;Email;Calendar;
 Keywords=mail;email;calendar;agenda;tasks;todo;gmail;outlook;
 MimeType=x-scheme-handler/mailto;
-StartupWMClass=org.quickshell
+StartupWMClass=io.github.MaxGiuP.QuickMail
 SingleMainWindow=true
-Actions=Calendar;Accounts;
+Actions=Compose;Calendar;Accounts;
+
+[Desktop Action Compose]
+Name=New Message
+Exec=quickmail mailto:
 
 [Desktop Action Calendar]
 Name=Open Calendar & Tasks

@@ -52,6 +52,7 @@ Item {
     property bool windowClosePending: false
     readonly property bool safeToReplace: composePane.safeToReplace
     signal windowCloseReady()
+    signal windowCloseFailed()
 
     function itemBelongsTo(item, ancestor) {
         for (let current = item; current; current = current.parent) {
@@ -355,7 +356,10 @@ Item {
                 open: store.view === "compose"
                 store: root.store
                 z: 10
-                onCloseOperationFailed: root.windowClosePending = false
+                onCloseOperationFailed: {
+                    root.windowClosePending = false
+                    root.windowCloseFailed()
+                }
 
                 Behavior on width {
                     enabled: Theme.animationsEnabled

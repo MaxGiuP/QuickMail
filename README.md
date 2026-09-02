@@ -1,8 +1,8 @@
 # QuickMail
 
-QuickMail is a fast, local-first desktop email client for Hyprland and
-Quickshell. It pairs a Rust synchronization daemon with a responsive,
-Windows Mail-inspired QML interface.
+QuickMail is a fast, local-first desktop email client for Hyprland. It pairs a
+Rust synchronization daemon with an independently restartable Qt Quick/QML
+application and optional Quickshell dashboard integration.
 
 ## What works
 
@@ -27,11 +27,13 @@ Windows Mail-inspired QML interface.
 
 ## Install
 
-QuickMail currently targets Arch Linux-style Hyprland desktops with
-Quickshell, Qt 6, GNOME Online Accounts, GNOME Control Center, Secret Service,
-Rust, systemd, and the Inter and Material Symbols Rounded fonts. On Arch, the
-font packages used by the interface are `inter-font` and
-`ttf-material-symbols-variable-git`.
+QuickMail currently targets Arch Linux-style Hyprland desktops with Qt 6.8 or
+newer, GNOME Online Accounts, GNOME Control Center, Secret Service, Rust, CMake,
+systemd, and the Inter and Material Symbols Rounded fonts. The Qt application
+uses the Core, GUI, QML, Quick, Network, Multimedia, and PDF modules.
+Quickshell is optional and supplies the desktop dashboard widgets, not the
+application window. On Arch, the font packages used by the interface are
+`inter-font` and `ttf-material-symbols-variable-git`.
 
 ```sh
 git clone https://github.com/MaxGiuP/QuickMail.git
@@ -65,11 +67,13 @@ Google IMAP/SMTP · Microsoft Graph · generic IMAP/SMTP
  SQLite WAL + FTS5
         │
  private JSON-RPC socket
-        │
- Quickshell / QML UI
+        ├── standalone Qt Quick/QML UI
+        └── optional Quickshell dashboard
 ```
 
-The UI does no mail-protocol or database work. Message lists use cached
+The application window and Quickshell widgets run independently of each other
+and communicate only through the daemon's public RPC surface. The UI does no
+mail-protocol or database work. Message lists use cached
 summaries; bodies and attachments are fetched only when opened. When the
 reader's remote-content setting is enabled, Qt may fetch allowlisted HTTP(S)
 images referenced by sanitized message HTML. Foreground sync is bounded so a
@@ -85,6 +89,11 @@ and [security](docs/security.md) for the implementation details.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cmake -S ui -B target/quickmail-ui-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build target/quickmail-ui-build --target quickmail-ui
+cmake --build target/quickmail-ui-build --target quickmail-hosttypes-test
+ctest --test-dir target/quickmail-ui-build --output-on-failure
+./ui/test-ui.sh
 ./packaging/test-qml.sh
 ```
 

@@ -1,13 +1,14 @@
 # QuickMail contributor guide
 
-QuickMail is a performance-focused email client for this Hyprland/Quickshell desktop.
+QuickMail is a performance-focused email client for this Hyprland desktop.
 
 ## Architecture
 
 - `crates/quickmail-core`: provider-neutral models, RPC types, and traits. It must not depend on UI or storage implementations.
 - `crates/quickmaild`: long-running Rust daemon, SQLite cache, provider implementations, keyring access, sync engine, and Unix-socket RPC.
 - `crates/quickmailctl`: command-line setup, diagnostics, and RPC client.
-- `qml`: thin Quickshell/QML client. Business logic and secrets do not belong here.
+- `ui`: standalone Qt Quick host, native platform adapters, and single-instance command routing.
+- `qml`: host-neutral Qt Quick client plus optional adapters under `qml/host`. Business logic and secrets do not belong here.
 
 ## Quality bar
 

@@ -14,14 +14,16 @@ sh -n \
     "$project_dir/packaging/install.sh" \
     "$project_dir/packaging/quickmail" \
     "$project_dir/packaging/test-qml.sh" \
-    "$project_dir/packaging/test-packaging.sh"
+    "$project_dir/packaging/test-packaging.sh" \
+    "$project_dir/ui/test-ui.sh"
 
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck \
         "$project_dir/packaging/install.sh" \
         "$project_dir/packaging/quickmail" \
         "$project_dir/packaging/test-qml.sh" \
-        "$project_dir/packaging/test-packaging.sh"
+        "$project_dir/packaging/test-packaging.sh" \
+        "$project_dir/ui/test-ui.sh"
 fi
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
@@ -33,6 +35,7 @@ stage=$test_root/stage
 install -d -m 0755 "$fake_bin"
 install -m 0755 /bin/true "$fake_bin/quickmaild"
 install -m 0755 /bin/true "$fake_bin/quickmailctl"
+install -m 0755 /bin/true "$fake_bin/quickmail-ui"
 
 DESTDIR=$stage PREFIX=/usr QUICKMAIL_SKIP_BUILD=1 QUICKMAIL_BINARY_DIR=$fake_bin \
     "$project_dir/packaging/install.sh"
@@ -43,7 +46,7 @@ DESTDIR=$stage PREFIX=/usr QUICKMAIL_SKIP_BUILD=1 QUICKMAIL_BINARY_DIR=$fake_bin
 [ ! -e "$stage/usr/share/quickmail/qml/stale-removed-file.qml" ] \
     || fail "reinstall retained a stale file in the managed QML tree"
 
-for executable in quickmaild quickmailctl quickmail
+for executable in quickmaild quickmailctl quickmail-ui quickmail
 do
     [ "$(stat -c %a "$stage/usr/bin/$executable")" = 755 ] \
         || fail "$executable was not installed with mode 0755"
@@ -87,7 +90,7 @@ qml=$test_root/qml
 command_dir=$test_root/commands
 install -d -m 0700 "$runtime"
 install -d -m 0755 "$qml" "$command_dir"
-: >"$qml/shell.qml"
+: >"$qml/StandaloneMain.qml"
 
 cat >"$command_dir/systemctl" <<'EOF'
 #!/bin/sh
@@ -108,56 +111,18 @@ exit 0
 EOF
 cat >"$command_dir/qs" <<'EOF'
 #!/bin/sh
-{
-    echo CALL
-    printf '%s\n' "$@"
-    printf 'MAILTO=%s\n' "${QUICKMAIL_MAILTO_URI:-}"
-    printf 'OPEN_ACCOUNTS=%s\n' "${QUICKMAIL_OPEN_ACCOUNTS:-}"
-    printf 'OPEN_CALENDAR=%s\n' "${QUICKMAIL_OPEN_CALENDAR:-}"
-} >>"$QUICKMAIL_TEST_QS_LOG"
-if [ "${QUICKMAIL_TEST_QS_IPC_FAIL:-0}" = 1 ] && [ "${1:-}" = ipc ]; then
-    exit 1
-fi
 if [ "${1:-}" = list ] && [ -n "${QUICKMAIL_TEST_QS_INSTANCE_PID:-}" ]; then
     printf 'Instance test:\n  Process ID: %s\n' "$QUICKMAIL_TEST_QS_INSTANCE_PID"
-    exit 0
 fi
-if [ "${1:-}" = kill ] && [ -n "${QUICKMAIL_TEST_QS_INSTANCE_PID:-}" ]; then
-    if [ -n "${QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER:-}" ] \
-        && [ ! -e "$QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER" ]; then
-        printf 'LEGACY_KILLED_EARLY\n' >>"$QUICKMAIL_TEST_QS_LOG"
-    fi
-    (
-        sleep "${QUICKMAIL_TEST_QS_KILL_DELAY:-0}"
-        kill "$QUICKMAIL_TEST_QS_INSTANCE_PID" 2>/dev/null || true
-    ) >/dev/null 2>&1 &
-    exit 0
-fi
-if [ "${1:-}" = --no-duplicate ] \
-    && [ -n "${QUICKMAIL_TEST_QS_INSTANCE_PID:-}" ] \
-    && kill -0 "$QUICKMAIL_TEST_QS_INSTANCE_PID" 2>/dev/null; then
-    printf 'DUPLICATE_LOCKED\n' >>"$QUICKMAIL_TEST_QS_LOG"
-    exit 73
-fi
-if [ "${1:-}" = ipc ] && [ "${4:-}" = prop ] \
-    && [ "${5:-}" = get ] && [ "${7:-}" = windowMapped ]; then
-    printf '%s\n' "${QUICKMAIL_TEST_WINDOW_MAPPED:-true}"
-fi
-if [ "${1:-}" = ipc ] && [ "${4:-}" = prop ] \
-    && [ "${5:-}" = get ] && [ "${7:-}" = safeToReplace ]; then
-    if [ "${QUICKMAIL_TEST_SAFE_PROPERTY_MISSING:-0}" = 1 ]; then
-        if [ -n "${QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER:-}" ]; then
-            (
-                sleep "${QUICKMAIL_TEST_LEGACY_AUTOSAVE_DELAY:-1.6}"
-                : >"$QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER"
-            ) >/dev/null 2>&1 &
-        fi
-        printf 'Property not found.\n'
-        exit 0
-    fi
-    printf '%s\n' "${QUICKMAIL_TEST_SAFE_TO_REPLACE:-true}"
-fi
-exit 0
+EOF
+cat >"$command_dir/quickmail-ui" <<'EOF'
+#!/bin/sh
+{
+    echo CALL
+    printf 'ARGC=%s\n' "$#"
+    printf '%s\n' "$@"
+    printf 'QML_DIR=%s\n' "${QUICKMAIL_QML_DIR:-}"
+} >>"$QUICKMAIL_TEST_UI_LOG"
 EOF
 cat >"$command_dir/quickmaild" <<'EOF'
 #!/bin/sh
@@ -179,7 +144,81 @@ fi
 [ "${QUICKMAIL_TEST_DAEMON_HEALTHY:-1}" = 1 ]
 EOF
 chmod 0755 "$command_dir/systemctl" "$command_dir/qs" \
+    "$command_dir/quickmail-ui" \
     "$command_dir/quickmaild" "$command_dir/quickmailctl"
+
+legacy_prefix=$test_root/legacy-prefix
+legacy_stderr=$test_root/legacy-install.stderr
+install -d -m 0755 "$legacy_prefix/share/quickmail/qml"
+: >"$legacy_prefix/share/quickmail/qml/shell.qml"
+sleep 10 &
+legacy_ui_pid=$!
+if PATH=$command_dir:/usr/bin:/bin \
+    QUICKMAIL_TEST_QS_INSTANCE_PID=$legacy_ui_pid \
+    PREFIX=$legacy_prefix \
+    QUICKMAIL_SKIP_BUILD=1 \
+    QUICKMAIL_BINARY_DIR=$fake_bin \
+    "$project_dir/packaging/install.sh" 2>"$legacy_stderr"; then
+    kill "$legacy_ui_pid" 2>/dev/null || true
+    wait "$legacy_ui_pid" 2>/dev/null || true
+    fail "installer replaced files while the legacy Quickshell UI was running"
+fi
+kill "$legacy_ui_pid" 2>/dev/null || true
+wait "$legacy_ui_pid" 2>/dev/null || true
+grep -F 'close QuickMail normally to save any draft' "$legacy_stderr" >/dev/null \
+    || fail "legacy UI guard did not explain how to retry safely"
+[ ! -e "$legacy_prefix/bin/quickmail-ui" ] \
+    || fail "legacy UI guard ran after replacing application files"
+
+standalone_runtime=$test_root/standalone-runtime
+standalone_prefix=$test_root/standalone-prefix
+standalone_stderr=$test_root/standalone-install.stderr
+install -d -m 0700 "$standalone_runtime/quickmail"
+sleep 10 &
+standalone_ui_pid=$!
+{
+    printf '%s\n' "$standalone_ui_pid"
+    printf '%s\n' quickmail-ui test-host test-id
+} >"$standalone_runtime/quickmail/ui.lock"
+if PATH=$command_dir:/usr/bin:/bin \
+    XDG_RUNTIME_DIR=$standalone_runtime \
+    PREFIX=$standalone_prefix \
+    QUICKMAIL_SKIP_BUILD=1 \
+    QUICKMAIL_BINARY_DIR=$fake_bin \
+    "$project_dir/packaging/install.sh" 2>"$standalone_stderr"; then
+    kill "$standalone_ui_pid" 2>/dev/null || true
+    wait "$standalone_ui_pid" 2>/dev/null || true
+    fail "installer replaced files while the standalone Qt UI was running"
+fi
+grep -F 'close QuickMail normally to save any draft' "$standalone_stderr" >/dev/null \
+    || fail "standalone UI guard did not explain how to retry safely"
+[ ! -e "$standalone_prefix/bin/quickmail-ui" ] \
+    || fail "standalone UI guard ran after replacing application files"
+
+standalone_stage=$test_root/standalone-stage
+PATH=$command_dir:/usr/bin:/bin \
+XDG_RUNTIME_DIR=$standalone_runtime \
+DESTDIR=$standalone_stage \
+PREFIX=/usr \
+QUICKMAIL_SKIP_BUILD=1 \
+QUICKMAIL_BINARY_DIR=$fake_bin \
+    "$project_dir/packaging/install.sh" >/dev/null
+[ -x "$standalone_stage/usr/bin/quickmail-ui" ] \
+    || fail "standalone UI guard incorrectly blocked a DESTDIR install"
+
+kill "$standalone_ui_pid" 2>/dev/null || true
+wait "$standalone_ui_pid" 2>/dev/null || true
+
+zero_lock_prefix=$test_root/zero-lock-prefix
+printf '0000\n' >"$standalone_runtime/quickmail/ui.lock"
+PATH=$command_dir:/usr/bin:/bin \
+XDG_RUNTIME_DIR=$standalone_runtime \
+PREFIX=$zero_lock_prefix \
+QUICKMAIL_SKIP_BUILD=1 \
+QUICKMAIL_BINARY_DIR=$fake_bin \
+    "$project_dir/packaging/install.sh" >/dev/null
+[ -x "$zero_lock_prefix/bin/quickmail-ui" ] \
+    || fail "a zero PID in ui.lock was treated as a live standalone UI"
 
 systemctl_log=$test_root/systemctl-install.log
 live_prefix=$test_root/live-prefix
@@ -202,119 +241,66 @@ grep -F "ExecStart=\"$live_prefix/bin/quickmaild\"" \
     "$live_prefix/share/systemd/user/quickmaild.service" >/dev/null \
     || fail "custom-prefix service does not use its installed daemon"
 
+QUICKMAIL_UI_BINARY=$command_dir/quickmail-ui
+export QUICKMAIL_UI_BINARY
+
 mailto='mailto:person@example.com?subject=Hello%20world&body=a%26b'
-qs_log=$test_root/qs-forward.log
+ui_log=$test_root/ui-forward.log
 PATH=$command_dir:/usr/bin:/bin \
 HOME=$test_root/home \
 XDG_RUNTIME_DIR=$runtime \
 QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$qs_log \
+QUICKMAIL_TEST_UI_LOG=$ui_log \
     "$project_dir/packaging/quickmail" -- "$mailto"
-grep -Fx "$mailto" "$qs_log" >/dev/null \
+grep -Fx 'ARGC=1' "$ui_log" >/dev/null \
+    || fail "mailto request did not preserve the standalone UI argument count"
+grep -Fx "$mailto" "$ui_log" >/dev/null \
     || fail "mailto URI was not forwarded as one unchanged argument"
-grep -Fx compose "$qs_log" >/dev/null \
-    || fail "running-client compose IPC was not attempted"
+grep -Fx "QML_DIR=$qml" "$ui_log" >/dev/null \
+    || fail "launcher did not expose the resolved QML tree to the standalone UI"
 
-accounts_log=$test_root/qs-accounts-running.log
+default_log=$test_root/ui-default.log
 PATH=$command_dir:/usr/bin:/bin \
 HOME=$test_root/home \
 XDG_RUNTIME_DIR=$runtime \
 QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$accounts_log \
-    "$project_dir/packaging/quickmail" --accounts
-grep -Fx accounts "$accounts_log" >/dev/null \
-    || fail "running-client accounts IPC was not attempted"
-
-calendar_log=$test_root/qs-calendar-running.log
-PATH=$command_dir:/usr/bin:/bin \
-HOME=$test_root/home \
-XDG_RUNTIME_DIR=$runtime \
-QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$calendar_log \
-    "$project_dir/packaging/quickmail" --calendar
-grep -Fx calendar "$calendar_log" >/dev/null \
-    || fail "running-client calendar IPC was not attempted"
-
-stale_log=$test_root/qs-stale-window.log
-sleep 10 &
-stale_instance_pid=$!
-PATH=$command_dir:/usr/bin:/bin \
-HOME=$test_root/home \
-XDG_RUNTIME_DIR=$runtime \
-QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$stale_log \
-QUICKMAIL_TEST_WINDOW_MAPPED=false \
-QUICKMAIL_TEST_QS_INSTANCE_PID=$stale_instance_pid \
-QUICKMAIL_TEST_QS_KILL_DELAY=0.15 \
+QUICKMAIL_TEST_UI_LOG=$default_log \
     "$project_dir/packaging/quickmail"
-grep -Fx kill "$stale_log" >/dev/null \
-    || fail "a windowless running instance was not stopped"
-grep -Fx -- --no-duplicate "$stale_log" >/dev/null \
-    || fail "a replacement UI was not launched after stale IPC success"
-if grep -Fx DUPLICATE_LOCKED "$stale_log" >/dev/null; then
-    fail "the replacement raced the stale process/config lock"
-fi
+grep -Fx 'ARGC=0' "$default_log" >/dev/null \
+    || fail "default launch passed unexpected standalone UI arguments"
 
-legacy_stale_log=$test_root/qs-legacy-stale-window.log
-legacy_autosave_marker=$test_root/legacy-autosave-complete
-sleep 10 &
-legacy_stale_instance_pid=$!
+accounts_log=$test_root/ui-accounts.log
 PATH=$command_dir:/usr/bin:/bin \
 HOME=$test_root/home \
 XDG_RUNTIME_DIR=$runtime \
 QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$legacy_stale_log \
-QUICKMAIL_TEST_WINDOW_MAPPED=false \
-QUICKMAIL_TEST_QS_INSTANCE_PID=$legacy_stale_instance_pid \
-QUICKMAIL_TEST_SAFE_PROPERTY_MISSING=1 \
-QUICKMAIL_TEST_LEGACY_AUTOSAVE_MARKER=$legacy_autosave_marker \
-QUICKMAIL_TEST_LEGACY_AUTOSAVE_DELAY=1.6 \
-    "$project_dir/packaging/quickmail"
-grep -Fx kill "$legacy_stale_log" >/dev/null \
-    || fail "a legacy windowless instance was not stopped after its autosave grace"
-[ -e "$legacy_autosave_marker" ] \
-    || fail "the launcher did not wait for the legacy autosave grace"
-if grep -Fx LEGACY_KILLED_EARLY "$legacy_stale_log" >/dev/null; then
-    fail "a legacy UI was killed before its asynchronous autosave grace"
-fi
-
-accounts_log=$test_root/qs-accounts-startup.log
-PATH=$command_dir:/usr/bin:/bin \
-HOME=$test_root/home \
-XDG_RUNTIME_DIR=$runtime \
-QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$accounts_log \
-QUICKMAIL_TEST_QS_IPC_FAIL=1 \
+QUICKMAIL_TEST_UI_LOG=$accounts_log \
     "$project_dir/packaging/quickmail" -- --accounts
-grep -Fx accounts "$accounts_log" >/dev/null \
-    || fail "accounts IPC was not attempted before launching a new instance"
-grep -Fx 'OPEN_ACCOUNTS=1' "$accounts_log" >/dev/null \
-    || fail "new QML process did not inherit QUICKMAIL_OPEN_ACCOUNTS=1"
-grep -Fx -- --no-duplicate "$accounts_log" >/dev/null \
-    || fail "accounts request did not launch QML after failed IPC"
+grep -Fx 'ARGC=1' "$accounts_log" >/dev/null \
+    || fail "accounts request did not preserve the standalone UI argument count"
+grep -Fx -- --accounts "$accounts_log" >/dev/null \
+    || fail "accounts request was not forwarded to the standalone UI"
+
+calendar_log=$test_root/ui-calendar.log
+PATH=$command_dir:/usr/bin:/bin \
+HOME=$test_root/home \
+XDG_RUNTIME_DIR=$runtime \
+QUICKMAIL_QML_DIR=$qml \
+QUICKMAIL_TEST_UI_LOG=$calendar_log \
+    "$project_dir/packaging/quickmail" -- --calendar
+grep -Fx 'ARGC=1' "$calendar_log" >/dev/null \
+    || fail "calendar request did not preserve the standalone UI argument count"
+grep -Fx -- --calendar "$calendar_log" >/dev/null \
+    || fail "calendar request was not forwarded to the standalone UI"
+
 if PATH=$command_dir:/usr/bin:/bin \
     HOME=$test_root/home \
     XDG_RUNTIME_DIR=$runtime \
     QUICKMAIL_QML_DIR=$qml \
-    QUICKMAIL_TEST_QS_LOG=$test_root/invalid.log \
+    QUICKMAIL_TEST_UI_LOG=$test_root/invalid.log \
     "$project_dir/packaging/quickmail" --accounts unexpected >/dev/null 2>&1; then
     fail "launcher accepted extra arguments after --accounts"
 fi
-
-calendar_log=$test_root/qs-calendar-startup.log
-PATH=$command_dir:/usr/bin:/bin \
-HOME=$test_root/home \
-XDG_RUNTIME_DIR=$runtime \
-QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$calendar_log \
-QUICKMAIL_TEST_QS_IPC_FAIL=1 \
-    "$project_dir/packaging/quickmail" -- --calendar
-grep -Fx calendar "$calendar_log" >/dev/null \
-    || fail "calendar IPC was not attempted before launching a new instance"
-grep -Fx 'OPEN_CALENDAR=1' "$calendar_log" >/dev/null \
-    || fail "new QML process did not inherit QUICKMAIL_OPEN_CALENDAR=1"
-grep -Fx -- --no-duplicate "$calendar_log" >/dev/null \
-    || fail "calendar request did not launch QML after failed IPC"
 
 unhealthy_runtime=$test_root/unhealthy-runtime
 unhealthy_systemctl_log=$test_root/systemctl-unhealthy.log
@@ -327,7 +313,7 @@ PATH=$command_dir:/usr/bin:/bin \
 HOME=$test_root/home \
 XDG_RUNTIME_DIR=$unhealthy_runtime \
 QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$test_root/qs-unhealthy.log \
+QUICKMAIL_TEST_UI_LOG=$test_root/ui-unhealthy.log \
 QUICKMAIL_TEST_SYSTEMCTL_LOG=$unhealthy_systemctl_log \
 QUICKMAIL_TEST_SYSTEMCTL_HEALTH_FILE=$unhealthy_health \
 QUICKMAIL_TEST_HEALTH_FILE=$unhealthy_health \
@@ -354,7 +340,7 @@ PATH=$command_dir:/usr/bin:/bin \
 HOME=$test_root/home \
 XDG_RUNTIME_DIR=$not_ready_runtime \
 QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$test_root/qs-not-ready.log \
+QUICKMAIL_TEST_UI_LOG=$test_root/ui-not-ready.log \
 QUICKMAIL_TEST_SYSTEMCTL_LOG=$test_root/systemctl-not-ready.log \
 QUICKMAIL_TEST_DAEMON_HEALTHY=0 \
 QUICKMAIL_TEST_DAEMON_LOG=$not_ready_daemon_log \
@@ -364,7 +350,7 @@ QUICKMAIL_TEST_DAEMON_LOG=$not_ready_daemon_log \
 grep -F 'systemd started quickmaild, but it is not ready yet' "$not_ready_stderr" >/dev/null \
     || fail "launcher did not report an unready systemd daemon"
 
-qs_log=$test_root/qs-launch.log
+ui_log=$test_root/ui-launch.log
 daemon_log=$test_root/daemon.log
 health_file=$test_root/fallback-daemon-ready
 PATH=$command_dir:/usr/bin:/bin \
@@ -374,12 +360,11 @@ XDG_DATA_HOME=$test_root/data \
 XDG_STATE_HOME=$test_root/state \
 XDG_CACHE_HOME=$test_root/cache \
 QUICKMAIL_QML_DIR=$qml \
-QUICKMAIL_TEST_QS_LOG=$qs_log \
+QUICKMAIL_TEST_UI_LOG=$ui_log \
 QUICKMAIL_TEST_DAEMON_LOG=$daemon_log \
 QUICKMAIL_TEST_DAEMON_HEALTHY=0 \
 QUICKMAIL_TEST_HEALTH_FILE=$health_file \
 QUICKMAIL_TEST_SYSTEMCTL_FAIL=1 \
-QUICKMAIL_TEST_QS_IPC_FAIL=1 \
     "$project_dir/packaging/quickmail" -- "$mailto"
 
 attempts=0
@@ -397,17 +382,24 @@ grep -Fx "$test_root/state/quickmail/mail.db" "$daemon_log" >/dev/null \
     || fail "fallback daemon database does not match the installed service layout"
 grep -Fx "$test_root/cache/quickmail/attachments" "$daemon_log" >/dev/null \
     || fail "fallback attachment cache does not match the installed service layout"
-grep -Fx -- --no-duplicate "$qs_log" >/dev/null \
-    || fail "QML application was not launched after failed IPC"
-grep -Fx "MAILTO=$mailto" "$qs_log" >/dev/null \
-    || fail "new QML process did not inherit the mailto URI"
+grep -Fx "$mailto" "$ui_log" >/dev/null \
+    || fail "standalone UI was not launched with the mailto URI"
 
 if env -u XDG_RUNTIME_DIR \
     PATH="$command_dir":/usr/bin:/bin \
     QUICKMAIL_QML_DIR="$qml" \
-    QUICKMAIL_TEST_QS_LOG="$test_root"/no-runtime.log \
+    QUICKMAIL_TEST_UI_LOG="$test_root"/no-runtime.log \
     "$project_dir/packaging/quickmail" >/dev/null 2>&1; then
     fail "launcher accepted an unset XDG_RUNTIME_DIR"
+fi
+
+if XDG_RUNTIME_DIR=relative/runtime \
+    PATH="$command_dir":/usr/bin:/bin \
+    HOME=$test_root/home \
+    QUICKMAIL_QML_DIR="$qml" \
+    QUICKMAIL_TEST_UI_LOG="$test_root"/relative-runtime.log \
+    "$project_dir/packaging/quickmail" >/dev/null 2>&1; then
+    fail "launcher accepted a relative XDG_RUNTIME_DIR"
 fi
 
 echo "Packaging tests passed"

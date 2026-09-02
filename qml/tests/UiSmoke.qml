@@ -9,6 +9,7 @@ ApplicationWindow {
     height: 760
     color: Theme.canvas
     property int windowCloseReadyCount: 0
+    property int windowCloseFailedCount: 0
     property int scenarioDeletedBefore: 0
     property int scenarioMailtosBefore: 0
     property int scenarioSentBefore: 0
@@ -226,6 +227,7 @@ ApplicationWindow {
         anchors.fill: parent
         store: fakeStore
         onWindowCloseReady: ++window.windowCloseReadyCount
+        onWindowCloseFailed: ++window.windowCloseFailedCount
     }
 
     Timer {
@@ -525,6 +527,8 @@ ApplicationWindow {
                 "a failed final draft save discarded the composer")
             window.expect(window.windowCloseReadyCount === 0,
                 "a failed final draft save allowed the window to quit")
+            window.expect(window.windowCloseFailedCount === 1,
+                "a failed final draft save did not ask the host to remap")
 
             mainWindow.prepareWindowClose()
             window.expect(window.windowCloseReadyCount === 1,
@@ -688,6 +692,8 @@ ApplicationWindow {
                 "send failure discarded or wedged the composer")
             window.expect(window.windowCloseReadyCount === 2,
                 "send failure incorrectly completed native close")
+            window.expect(window.windowCloseFailedCount === 2,
+                "a failed in-flight send did not ask the host to remap")
             mainWindow.prepareWindowClose()
             window.expect(window.windowCloseReadyCount === 3,
                 "native close was not retryable after send failure")
@@ -922,6 +928,8 @@ ApplicationWindow {
                 "failed discard closed or wedged the draft")
             window.expect(window.windowCloseReadyCount === 4,
                 "failed discard incorrectly completed native close")
+            window.expect(window.windowCloseFailedCount === 3,
+                "a failed draft discard did not ask the host to remap")
             window.expect(fakeStore.deletedDrafts
                     === window.scenarioDeletedBefore + 1,
                 "failed discard performed duplicate deletions")
@@ -988,6 +996,8 @@ ApplicationWindow {
             window.expect(fakeStore.startedComposers
                     === window.scenarioStartedBefore,
                 "cancelled replacement started after its close-save failed")
+            window.expect(window.windowCloseFailedCount === 4,
+                "a failed queued close-save did not ask the host to remap")
             mainWindow.prepareWindowClose()
             window.expect(window.windowCloseReadyCount === 6,
                 "native close was not retryable after replacement save failure")

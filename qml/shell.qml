@@ -27,6 +27,10 @@ ShellRoot {
         window: window
         onFocusRequested: focusTimer.restart()
     }
+    WindowCloseGuard {
+        id: windowCloseGuard
+        onTimedOut: root.revealWindow()
+    }
 
     function saveAttachment(source, destination, callback) {
         if (saveProcess.running) {
@@ -50,6 +54,7 @@ ShellRoot {
         // A launcher can arrive while native-window close is waiting for its
         // final draft save. Reopening wins: keep the saved draft open and do
         // not let the old completion callback quit the newly mapped window.
+        windowCloseGuard.cancel()
         mainWindow.cancelWindowClose()
         windowLifecycle.reveal()
     }
@@ -65,6 +70,7 @@ ShellRoot {
         color: Theme.canvas
         onClosed: {
             windowLifecycle.handleClosed()
+            if (!windowCloseGuard.begin()) return
             // Flush an open draft before ending the windowless UI process.
             // MainWindow emits windowCloseReady only after save-and-close has
             // completed, so closing the native window cannot race autosave.
@@ -75,7 +81,11 @@ ShellRoot {
             id: mainWindow
             anchors.fill: parent
             store: store
-            onWindowCloseReady: Qt.quit()
+            onWindowCloseReady: {
+                windowCloseGuard.complete()
+                Qt.quit()
+            }
+            onWindowCloseFailed: root.revealWindow()
         }
     }
 

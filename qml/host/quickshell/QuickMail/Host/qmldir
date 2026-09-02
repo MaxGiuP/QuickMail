@@ -1,0 +1,6 @@
+module QuickMail.Host
+singleton PlatformBridge 1.0 PlatformBridge.qml
+FileReader 1.0 FileReader.qml
+ProcessRunner 1.0 ProcessRunner.qml
+RpcTransport 1.0 RpcTransport.qml
+SettingsStore 1.0 SettingsStore.qml

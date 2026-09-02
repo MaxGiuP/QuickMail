@@ -19,6 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install Qt 6.8.3
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: '6.8.3'
+          modules: 'qtmultimedia qtwebengine'
+          cache: true
+          cache-key-prefix: quickmail-qt-6.8.3
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt, clippy
@@ -31,5 +38,13 @@ jobs:
         run: cargo test --locked --workspace --all-features
       - name: Packaging tests
         run: ./packaging/test-packaging.sh
+      - name: Configure Qt UI
+        run: cmake -S ui -B target/quickmail-ui-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build Qt UI
+        run: cmake --build target/quickmail-ui-build --config Release
+      - name: Qt host adapter tests
+        run: ctest --test-dir target/quickmail-ui-build --output-on-failure
+      - name: Qt UI integration tests
+        run: ./ui/test-ui.sh
       - name: Release build
         run: cargo build --locked --workspace --release

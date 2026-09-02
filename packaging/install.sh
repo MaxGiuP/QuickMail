@@ -47,9 +47,17 @@ if [ "$skip_build" -eq 0 ]; then
         echo "install.sh: cargo is required" >&2
         exit 1
     }
+    command -v cmake >/dev/null 2>&1 || {
+        echo "install.sh: cmake is required to build the standalone Qt UI" >&2
+        exit 1
+    }
 
     (CDPATH='' cd -- "$project_dir" && cargo build --release --locked \
         --package quickmaild --package quickmailctl)
+    cmake -S "$project_dir/ui" -B "$project_dir/target/quickmail-ui-build" \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+    cmake --build "$project_dir/target/quickmail-ui-build" \
+        --config Release --target quickmail-ui
 fi
 
 if [ -n "${QUICKMAIL_BINARY_DIR:-}" ]; then
@@ -63,6 +71,14 @@ else
     binary_dir=$cargo_target_dir/release
 fi
 
+if [ -n "${QUICKMAIL_UI_BINARY:-}" ]; then
+    ui_binary=$QUICKMAIL_UI_BINARY
+elif [ -n "${QUICKMAIL_BINARY_DIR:-}" ]; then
+    ui_binary=$QUICKMAIL_BINARY_DIR/quickmail-ui
+else
+    ui_binary=$project_dir/target/quickmail-ui-build/quickmail-ui
+fi
+
 for binary in quickmaild quickmailctl
 do
     if [ ! -f "$binary_dir/$binary" ] || [ ! -x "$binary_dir/$binary" ]; then
@@ -70,6 +86,10 @@ do
         exit 1
     fi
 done
+if [ ! -f "$ui_binary" ] || [ ! -x "$ui_binary" ]; then
+    echo "install.sh: missing executable $ui_binary" >&2
+    exit 1
+fi
 
 destroot=${destdir%/}
 install_root=$destroot$prefix
@@ -82,9 +102,50 @@ application_dir=$install_root/share/applications
 unit_dir=$install_root/share/systemd/user
 logical_bin_dir=$logical_root/bin
 
+refuse_running_ui_install() {
+    ui_description=$1
+    ui_pid=$2
+    echo "install.sh: the $ui_description is still running (PID $ui_pid)" >&2
+    echo "install.sh: close QuickMail normally to save any draft, then retry the installation" >&2
+    exit 1
+}
+
+if [ -z "$destdir" ]; then
+    runtime_root=${XDG_RUNTIME_DIR:-}
+    case "$runtime_root" in
+        /*)
+            standalone_lock=${runtime_root%/}/quickmail/ui.lock
+            if [ -f "$standalone_lock" ]; then
+                standalone_ui_pid=
+                IFS= read -r standalone_ui_pid <"$standalone_lock" || :
+                case "$standalone_ui_pid" in
+                    ''|0*|*[!0-9]*) standalone_ui_pid= ;;
+                esac
+                if [ -n "$standalone_ui_pid" ] \
+                    && [ "${#standalone_ui_pid}" -le 10 ] \
+                    && kill -0 "$standalone_ui_pid" 2>/dev/null; then
+                    refuse_running_ui_install "standalone Qt QuickMail UI" \
+                        "$standalone_ui_pid"
+                fi
+            fi
+            ;;
+    esac
+fi
+
+if [ -z "$destdir" ] && [ -f "$data_dir/shell.qml" ] \
+    && command -v qs >/dev/null 2>&1; then
+    legacy_ui_pid=$(qs list -p "$data_dir" 2>/dev/null \
+        | sed -n 's/^  Process ID: \([0-9][0-9]*\)$/\1/p' \
+        | sed -n '1p')
+    if [ -n "$legacy_ui_pid" ] && kill -0 "$legacy_ui_pid" 2>/dev/null; then
+        refuse_running_ui_install "legacy Quickshell QuickMail UI" "$legacy_ui_pid"
+    fi
+fi
+
 install -d -m 0755 "$bin_dir" "$app_data_dir" "$application_dir" "$unit_dir"
 install -m 0755 "$binary_dir/quickmaild" "$bin_dir/quickmaild"
 install -m 0755 "$binary_dir/quickmailctl" "$bin_dir/quickmailctl"
+install -m 0755 "$ui_binary" "$bin_dir/quickmail-ui"
 install -m 0755 "$project_dir/packaging/quickmail" "$bin_dir/quickmail"
 
 # Build the managed QML tree separately so removed source files cannot linger

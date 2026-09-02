@@ -3,6 +3,13 @@ set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 : "${XDG_RUNTIME_DIR:?quickmail: XDG_RUNTIME_DIR is required for a private daemon socket}"
+case "$XDG_RUNTIME_DIR" in
+    /*) ;;
+    *)
+        echo "quickmail: XDG_RUNTIME_DIR must be an absolute path" >&2
+        exit 1
+        ;;
+esac
 daemon_socket=$XDG_RUNTIME_DIR/quickmail/daemon.sock
 : "${HOME:?quickmail: HOME is required}"
 state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
@@ -20,7 +27,7 @@ find_qml_dir() {
         "/usr/local/share/quickmail/qml" \
         "/usr/share/quickmail/qml"
     do
-        if [ -n "$candidate" ] && [ -f "$candidate/shell.qml" ]; then
+        if [ -n "$candidate" ] && [ -f "$candidate/StandaloneMain.qml" ]; then
             CDPATH='' cd -- "$candidate" && pwd
             return 0
         fi
@@ -31,6 +38,23 @@ find_qml_dir() {
 qml_dir=$(find_qml_dir) || {
     echo "quickmail: could not find the installed QML application" >&2
     exit 1
+}
+QUICKMAIL_QML_DIR=$qml_dir
+export QUICKMAIL_QML_DIR
+
+find_ui() {
+    for candidate in \
+        "${QUICKMAIL_UI_BINARY:-}" \
+        "$script_dir/quickmail-ui" \
+        "$script_dir/../target/quickmail-ui-build/quickmail-ui" \
+        "$(command -v quickmail-ui 2>/dev/null || true)"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 find_ctl() {
@@ -158,152 +182,19 @@ case $# in
         ;;
 esac
 
-command -v qs >/dev/null 2>&1 || {
-    echo "quickmail: Quickshell (qs) is required" >&2
+ui_bin=$(find_ui) || {
+    echo "quickmail: the standalone Qt UI (quickmail-ui) was not found" >&2
     exit 1
 }
 
 ensure_daemon
 
-window_is_mapped() {
-    mapped=$(qs ipc -p "$qml_dir" prop get quickMail windowMapped 2>/dev/null || true)
-    [ "$mapped" = true ]
-}
-
-wait_for_window() {
-    attempts=0
-    while [ "$attempts" -lt 20 ]
-    do
-        if window_is_mapped; then
-            return 0
-        fi
-        attempts=$((attempts + 1))
-        sleep 0.05
-    done
-    return 1
-}
-
-wait_for_legacy_autosave_grace() {
-    instance_pid=$1
-    attempts=0
-    # Releases before `safeToReplace` autosaved edits after 1.5 seconds but
-    # could not report whether that asynchronous write had completed. Give an
-    # old process a full additional grace period before its exact PID is ended.
-    while [ "$attempts" -lt 60 ]
-    do
-        if ! kill -0 "$instance_pid" 2>/dev/null; then
-            return 0
-        fi
-        attempts=$((attempts + 1))
-        sleep 0.05
-    done
-    return 0
-}
-
-wait_until_safe_to_replace() {
-    instance_pid=$1
-    attempts=0
-    while [ "$attempts" -lt 200 ]
-    do
-        if ! kill -0 "$instance_pid" 2>/dev/null; then
-            return 0
-        fi
-        if safe=$(qs ipc --pid "$instance_pid" prop get quickMail safeToReplace 2>/dev/null); then
-            case "$safe" in
-                true) return 0 ;;
-                false) ;;
-                Property\ not\ found*)
-                    # This is an older installed UI. It cannot expose draft
-                    # state, so never kill it on the same sub-second path as a
-                    # fresh edit.
-                    wait_for_legacy_autosave_grace "$instance_pid"
-                    return 0
-                    ;;
-            esac
-        fi
-        # An IPC failure or unknown response is not proof that a current draft
-        # is safe. Retry until the bounded refusal path below.
-        attempts=$((attempts + 1))
-        sleep 0.05
-    done
-    echo "quickmail: the hidden UI still has an unsaved draft; refusing to replace it" >&2
-    return 1
-}
-
-wait_for_instance_exit() {
-    instance_pid=$1
-    attempts=0
-    while [ "$attempts" -lt 100 ]
-    do
-        if ! kill -0 "$instance_pid" 2>/dev/null; then
-            return 0
-        fi
-        attempts=$((attempts + 1))
-        sleep 0.05
-    done
-    echo "quickmail: the stale UI did not exit in time" >&2
-    return 1
-}
-
-replace_stale_ui() {
-    instance_pid=$1
-    # `qs ipc call` can succeed after the compositor has already destroyed the
-    # only native window. Stop that exact configuration so --no-duplicate can
-    # create a usable replacement below.
-    if [ -z "$instance_pid" ]; then
-        # `qs list` excludes dead registrations. With no live PID there is no
-        # process/config lock left for --no-duplicate to race.
-        return 0
-    fi
-    wait_until_safe_to_replace "$instance_pid" || return 1
-    qs kill --pid "$instance_pid" >/dev/null 2>&1 || true
-    wait_for_instance_exit "$instance_pid"
-}
-
-running_instance_pid() {
-    qs list -p "$qml_dir" 2>/dev/null \
-        | sed -n 's/^  Process ID: \([0-9][0-9]*\)$/\1/p' \
-        | sed -n '1p'
-}
-
 if [ "$open_accounts" -eq 1 ]; then
-    if qs ipc -p "$qml_dir" call quickMail accounts >/dev/null 2>&1; then
-        instance_pid=$(running_instance_pid)
-        if wait_for_window; then
-            exit 0
-        fi
-        replace_stale_ui "$instance_pid" || exit 1
-    fi
-    QUICKMAIL_OPEN_ACCOUNTS=1
-    export QUICKMAIL_OPEN_ACCOUNTS
+    exec "$ui_bin" --accounts
 elif [ "$open_calendar" -eq 1 ]; then
-    if qs ipc -p "$qml_dir" call quickMail calendar >/dev/null 2>&1; then
-        instance_pid=$(running_instance_pid)
-        if wait_for_window; then
-            exit 0
-        fi
-        replace_stale_ui "$instance_pid" || exit 1
-    fi
-    QUICKMAIL_OPEN_CALENDAR=1
-    export QUICKMAIL_OPEN_CALENDAR
+    exec "$ui_bin" --calendar
 elif [ -n "$mailto_uri" ]; then
-    if qs ipc -p "$qml_dir" call quickMail compose "$mailto_uri" >/dev/null 2>&1; then
-        instance_pid=$(running_instance_pid)
-        if wait_for_window; then
-            exit 0
-        fi
-        replace_stale_ui "$instance_pid" || exit 1
-    fi
-    QUICKMAIL_MAILTO_URI=$mailto_uri
-    export QUICKMAIL_MAILTO_URI
-else
-    if qs ipc -p "$qml_dir" call quickMail show >/dev/null 2>&1; then
-        instance_pid=$(running_instance_pid)
-        if wait_for_window; then
-            exit 0
-        fi
-        replace_stale_ui "$instance_pid" || exit 1
-    fi
+    exec "$ui_bin" "$mailto_uri"
 fi
 
-exec qs --no-duplicate -p "$qml_dir"
+exec "$ui_bin"

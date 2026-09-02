@@ -20,9 +20,14 @@ for or stores a Google or Microsoft password, OAuth client ID, OAuth client
 secret, or access token. Generic and manual Exchange IMAP/SMTP passwords are
 handed directly to the connected local daemon for keyring storage.
 
-The desktop launcher starts the user service when available, hands `mailto:`
-links to an already-running window over Quickshell IPC, and otherwise resolves
-the QML tree from the installed `share/quickmail/qml` layout. Attachment
+The desktop launcher starts the user service when available, hands launch,
+calendar, account, and `mailto:` requests to the single standalone Qt window,
+and otherwise resolves the QML tree from the installed
+`share/quickmail/qml` layout. Quickshell can load the same host-neutral QML
+through its adapter module, but it does not own the primary application
+window. Closing either host waits for an open draft to finish saving while
+keeping it recoverable on screen; an unanswered save cancels the close attempt
+after ten seconds instead of hiding the UI or discarding data. Attachment
 downloads are cached privately by the daemon. Preview opens an in-app reader
 for PDFs, raster images, text and source files, audio, video, and office
 documents (converted to a temporary read-only PDF when LibreOffice is
@@ -53,6 +58,7 @@ use the daemon's account-scoped list/get/delete lifecycle and carry their
 Validate the UI with:
 
 ```sh
+ui/test-ui.sh
 packaging/test-qml.sh
 ```
 

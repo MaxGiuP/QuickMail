@@ -3,7 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Quickshell.Io
+import QuickMail.Host as Host
 import ".."
 
 Popup {
@@ -333,15 +333,13 @@ Popup {
         cleanupOfficeArtifacts()
     }
 
-    FileView {
+    Host.FileReader {
         id: textFile
         path: root.previewKind === "text" ? root.sourcePath : ""
         preload: root.previewKind === "text" && root.sourcePath !== ""
-        watchChanges: false
-        printErrors: false
         onLoaded: {
             if (root.previewKind !== "text" || path !== root.sourcePath) return
-            const loadedText = text()
+            const loadedText = content
             root.textContent = loadedText.length > root.maximumTextCharacters
                 ? loadedText.substring(0, root.maximumTextCharacters)
                     + "\n\n[Preview truncated at 1,000,000 characters]"
@@ -355,25 +353,23 @@ Popup {
         }
     }
 
-    Process {
+    Host.ProcessRunner {
         id: hexProcess
         property int request: 0
-        stdout: StdioCollector { id: hexOutput; waitForEnd: true }
-        stderr: StdioCollector { id: hexError; waitForEnd: true }
         onExited: (exitCode, exitStatus) => {
             if (request !== root.requestGeneration || root.previewKind !== "binary") return
             binaryTimeout.stop()
             root.binaryLoading = false
-            if (exitCode === 0 && hexOutput.text !== "") {
-                root.binaryContent = hexOutput.text
+            if (exitCode === 0 && stdoutText !== "") {
+                root.binaryContent = stdoutText
             } else {
                 root.previewError = "QuickMail could not inspect this binary file."
-                    + (hexError.text !== "" ? " " + hexError.text.trim() : "")
+                    + (stderrText !== "" ? " " + stderrText.trim() : "")
             }
         }
     }
 
-    Process {
+    Host.ProcessRunner {
         id: officeCopyProcess
         property int request: 0
         onExited: (exitCode, exitStatus) => {
@@ -382,18 +378,16 @@ Popup {
         }
     }
 
-    Process {
+    Host.ProcessRunner {
         id: officeConvertProcess
         property int request: 0
-        stdout: StdioCollector { waitForEnd: true }
-        stderr: StdioCollector { waitForEnd: true }
         onExited: (exitCode, exitStatus) => {
             root.convertOfficePreviewFinished(exitCode, request)
             if (root.officeCleanupPending) root.cleanupOfficeArtifacts()
         }
     }
 
-    Process { id: cleanupProcess }
+    Host.ProcessRunner { id: cleanupProcess }
 
     Timer {
         id: binaryTimeout

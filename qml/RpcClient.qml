@@ -1,6 +1,5 @@
 import QtQuick
-import Quickshell
-import Quickshell.Io
+import QuickMail.Host as Host
 
 QtObject {
     id: root
@@ -47,8 +46,9 @@ QtObject {
         resyncRequired: "system.resync_required"
     })
 
-    readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
-    property string socketPath: runtimeDir + "/quickmail/daemon.sock"
+    property string socketPathOverride: ""
+    property string socketPath: socketPathOverride !== ""
+        ? socketPathOverride : socket.defaultSocketPath
     property bool connectRequested: false
     readonly property bool connected: socket.connected
     property bool connecting: !connected && connectRequested
@@ -95,7 +95,6 @@ QtObject {
         pending = callbacks
         if (socket.connected) {
             socket.write(frame)
-            socket.flush()
         } else {
             const queued = writeQueue.slice()
             queued.push(frame)
@@ -127,7 +126,6 @@ QtObject {
         }) + "\n"
         if (socket.connected) {
             socket.write(frame)
-            socket.flush()
         } else {
             const queued = writeQueue.slice()
             queued.push(frame)
@@ -174,7 +172,6 @@ QtObject {
         const queued = writeQueue
         writeQueue = []
         for (let i = 0; i < queued.length; ++i) socket.write(queued[i])
-        socket.flush()
     }
 
     function subscribeToEvents() {
@@ -184,7 +181,7 @@ QtObject {
     function scheduleReconnect() {
         if (reconnectTimer.running) return
         connectRequested = false
-        if (socket.connected) socket.connected = false
+        if (socket.connected) socket.disconnectSocket()
         retryDelayMs = Math.min(30000, 500 * Math.pow(2, Math.min(retryAttempt, 6)))
         retryAttempt += 1
         reconnectTimer.interval = retryDelayMs
@@ -193,16 +190,13 @@ QtObject {
 
     function attemptConnect() {
         connectRequested = true
-        socket.connected = true
+        socket.connectSocket()
     }
 
-    property Socket socket: Socket {
+    property Host.RpcTransport socket: Host.RpcTransport {
         id: socket
         path: root.socketPath
-        parser: SplitParser {
-            splitMarker: "\n"
-            onRead: data => root.handleLine(data)
-        }
+        onLineReceived: line => root.handleLine(line)
         onConnectionStateChanged: {
             // The Socket notify signal fires before bindings which mirror its
             // state (including root.connected) are reevaluated. Read the
@@ -224,7 +218,7 @@ QtObject {
                 root.scheduleReconnect()
             }
         }
-        onError: error => {
+        onErrorOccurred: error => {
             root.lastError = "Mail service unavailable"
             root.scheduleReconnect()
         }
