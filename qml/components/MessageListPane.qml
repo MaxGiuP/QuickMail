@@ -9,8 +9,11 @@ Rectangle {
     id: root
     required property var store
     property bool mobile: false
+    property bool shortcutScopeEnabled: visible && enabled
     property int _composeRequestGeneration: 0
     readonly property string activeAccountKey: String(store.activeAccountId || "")
+    readonly property bool messageSelectionShortcutsEnabled:
+        shortcutScopeEnabled && !search.activeFocus && !cursorContextMenuVisible()
     signal menuRequested()
     signal messageActivated()
     signal composeRequested(string mode, var message)
@@ -44,6 +47,49 @@ Rectangle {
                 || messageList.currentIndex >= store.conversations.length) return
         store.openMessage(store.conversations[messageList.currentIndex])
         messageActivated()
+    }
+
+    function selectedConversationIndex() {
+        if (!store.selectedMessage) return -1
+        const selectedKey = store.threadKey(store.selectedMessage)
+        const conversations = Array.isArray(store.conversations)
+            ? store.conversations : []
+        for (let index = 0; index < conversations.length; ++index) {
+            if (store.threadKey(conversations[index]) === selectedKey) return index
+        }
+        return -1
+    }
+
+    function selectRelativeMessage(delta) {
+        const conversations = Array.isArray(store.conversations)
+            ? store.conversations : []
+        if (conversations.length === 0 || delta === 0) return false
+
+        const selectedIndex = selectedConversationIndex()
+        let nextIndex
+        if (selectedIndex < 0) {
+            nextIndex = delta > 0 ? 0 : conversations.length - 1
+        } else {
+            nextIndex = Math.max(0, Math.min(conversations.length - 1,
+                selectedIndex + delta))
+            if (nextIndex === selectedIndex) {
+                messageList.currentIndex = selectedIndex
+                messageList.positionViewAtIndex(selectedIndex, ListView.Contain)
+                return false
+            }
+        }
+
+        messageList.currentIndex = nextIndex
+        messageList.positionViewAtIndex(nextIndex, ListView.Contain)
+        store.openMessage(conversations[nextIndex])
+        messageActivated()
+        return true
+    }
+
+    function cursorContextMenuVisible() {
+        if (messageList.currentIndex < 0) return false
+        const row = messageList.itemAtIndex(messageList.currentIndex)
+        return row ? row.contextMenuVisible === true : false
     }
 
     function showCursorContextMenu() {
@@ -144,6 +190,7 @@ Rectangle {
 
         LightSearchField {
             id: search
+            objectName: "messageSearchField"
             Layout.fillWidth: true
             Layout.leftMargin: Theme.space4
             Layout.rightMargin: Theme.space4
@@ -250,9 +297,9 @@ Rectangle {
                             || (event.key === Qt.Key_F10
                                 && (event.modifiers & Qt.ShiftModifier))) {
                         if (root.showCursorContextMenu()) event.accepted = true
-                    } else if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                    } else if (event.key === Qt.Key_J) {
                         root.moveCursor(1); event.accepted = true
-                    } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
+                    } else if (event.key === Qt.Key_K) {
                         root.moveCursor(-1); event.accepted = true
                     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
                             || event.key === Qt.Key_O) {
@@ -272,4 +319,20 @@ Rectangle {
     Shortcut { sequence: "Ctrl+K"; onActivated: search.forceActiveFocus() }
     Shortcut { sequence: "/"; onActivated: search.forceActiveFocus() }
     Shortcut { sequence: "F5"; onActivated: store.sync() }
+    Shortcut {
+        objectName: "nextMessageShortcut"
+        sequence: "Down"
+        context: Qt.WindowShortcut
+        enabled: root.messageSelectionShortcutsEnabled
+            && store.conversations.length > 0
+        onActivated: root.selectRelativeMessage(1)
+    }
+    Shortcut {
+        objectName: "previousMessageShortcut"
+        sequence: "Up"
+        context: Qt.WindowShortcut
+        enabled: root.messageSelectionShortcutsEnabled
+            && store.conversations.length > 0
+        onActivated: root.selectRelativeMessage(-1)
+    }
 }

@@ -38,11 +38,27 @@ Item {
     readonly property bool navigationRailVisible: navigationRail.visible
     readonly property real navigationRailWidth: navigationRail.width
     readonly property real mailListLeftEdge: messageListPane.x
+    readonly property var windowActiveFocusItem: root.Window.window
+        ? root.Window.window.activeFocusItem : null
+    readonly property bool messageSelectionShortcutContext:
+        root.mailSurfaceInteractive
+        && store.view !== "calendar" && !store.draftsOpen
+        && !root.navigationOpen && !root.accountSetupVisible
+        && (!root.windowActiveFocusItem
+            || root.itemBelongsTo(root.windowActiveFocusItem, messageListPane)
+            || root.itemBelongsTo(root.windowActiveFocusItem, messageReaderPane))
     readonly property bool draftsBackButtonVisible: draftsPane.backButtonVisible
     readonly property string renderedMessageHtml: messageReaderPane.renderedBodyHtml
     property bool windowClosePending: false
     readonly property bool safeToReplace: composePane.safeToReplace
     signal windowCloseReady()
+
+    function itemBelongsTo(item, ancestor) {
+        for (let current = item; current; current = current.parent) {
+            if (current === ancestor) return true
+        }
+        return false
+    }
 
     function openAccountSetup(account) {
         accountToEdit = account || null
@@ -202,6 +218,7 @@ Item {
                     Layout.fillHeight: true
                     store: root.store
                     mobile: root.mobile
+                    shortcutScopeEnabled: root.messageSelectionShortcutContext
                     onMenuRequested: root.navigationOpen = true
                     onMessageActivated: root.openMessagePage()
                     onComposeRequested: (mode, message) =>
