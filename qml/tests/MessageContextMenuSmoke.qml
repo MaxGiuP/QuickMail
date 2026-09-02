@@ -148,7 +148,7 @@ ApplicationWindow {
                     && (longPressHandler.acceptedDevices
                         & PointerDevice.TouchScreen) !== 0,
                 "touch long-press access was not available on the message row")
-            messageList.currentIndex = -1
+            listPane.clearCursor()
             starButton.forceActiveFocus()
             window.expect(messageList.currentIndex === 0,
                 "focusing a row action did not select its keyboard context target")

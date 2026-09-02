@@ -10,8 +10,20 @@ Rectangle {
     required property var store
     property bool mobile: false
     property bool shortcutScopeEnabled: visible && enabled
+    property int cursorIndex: -1
+    property int messageOpenDelayMs: Math.max(32,
+        Theme.animationsEnabled ? Theme.motionFast : 0)
     property int _composeRequestGeneration: 0
+    property string _cursorMessageKey: ""
+    property string _observedSelectedKey: ""
+    property string _pendingMessageKey: ""
+    property string _pendingAccountKey: ""
+    property string _pendingFolderKey: ""
+    property string _pendingSearchKey: ""
     readonly property string activeAccountKey: String(store.activeAccountId || "")
+    readonly property string activeFolderKey: String(store.activeFolderId || "")
+    readonly property string activeSearchKey: String(store.searchText || "")
+    readonly property bool messageOpenPending: _pendingMessageKey !== ""
     readonly property bool messageSelectionShortcutsEnabled:
         shortcutScopeEnabled && !search.activeFocus && !cursorContextMenuVisible()
     signal menuRequested()
@@ -20,7 +32,15 @@ Rectangle {
 
     color: Theme.canvas
 
-    onActiveAccountKeyChanged: ++_composeRequestGeneration
+    onActiveAccountKeyChanged: {
+        ++_composeRequestGeneration
+        resetCursorContext()
+    }
+    onActiveFolderKeyChanged: resetCursorContext()
+    onActiveSearchKeyChanged: resetCursorContext()
+    onMessageSelectionShortcutsEnabledChanged: {
+        if (!messageSelectionShortcutsEnabled) cancelPendingMessageOpen()
+    }
 
     function displayFolderName(folder) {
         return FolderPresentation.displayName(folder)
@@ -37,27 +57,159 @@ Rectangle {
 
     function moveCursor(delta) {
         if (messageList.count === 0) return
-        messageList.currentIndex = Math.max(0,
-            Math.min(messageList.count - 1, messageList.currentIndex + delta))
-        messageList.positionViewAtIndex(messageList.currentIndex, ListView.Contain)
+        cancelPendingMessageOpen()
+        const baseIndex = cursorIndex < 0
+            ? (delta > 0 ? -1 : messageList.count) : cursorIndex
+        setCursor(Math.max(0,
+            Math.min(messageList.count - 1, baseIndex + delta)),
+            store.conversations, true)
     }
 
     function openCursor() {
-        if (messageList.currentIndex < 0
-                || messageList.currentIndex >= store.conversations.length) return
-        store.openMessage(store.conversations[messageList.currentIndex])
+        cancelPendingMessageOpen()
+        if (cursorIndex < 0 || cursorIndex >= store.conversations.length) return
+        store.openMessage(store.conversations[cursorIndex])
         messageActivated()
     }
 
     function selectedConversationIndex() {
-        if (!store.selectedMessage) return -1
-        const selectedKey = store.threadKey(store.selectedMessage)
+        return conversationIndexForKey(selectedMessageKey())
+    }
+
+    function selectedMessageKey() {
+        if (!store.selectedMessage) return ""
+        return String(store.threadKey(store.selectedMessage) || "")
+    }
+
+    function conversationIndexForKey(key) {
+        if (String(key || "") === "") return -1
         const conversations = Array.isArray(store.conversations)
             ? store.conversations : []
         for (let index = 0; index < conversations.length; ++index) {
-            if (store.threadKey(conversations[index]) === selectedKey) return index
+            if (String(store.threadKey(conversations[index])) === String(key))
+                return index
         }
         return -1
+    }
+
+    function setCursor(index, conversations, reveal) {
+        const list = Array.isArray(conversations) ? conversations : []
+        if (index < 0 || index >= list.length) {
+            clearCursor()
+            return false
+        }
+        const key = String(store.threadKey(list[index]) || "")
+        if (key === "") {
+            clearCursor()
+            return false
+        }
+        _cursorMessageKey = key
+        cursorIndex = index
+        if (reveal) messageList.positionViewAtIndex(index, ListView.Contain)
+        return true
+    }
+
+    function clearCursor() {
+        _cursorMessageKey = ""
+        cursorIndex = -1
+    }
+
+    function synchronizeCursorToSelection(reveal) {
+        if (messageOpenPending) return
+        const conversations = Array.isArray(store.conversations)
+            ? store.conversations : []
+        const index = selectedConversationIndex()
+        if (index >= 0) setCursor(index, conversations, reveal === true)
+        else clearCursor()
+    }
+
+    function resetCursorContext() {
+        cancelPendingMessageOpen()
+        clearCursor()
+        _observedSelectedKey = selectedMessageKey()
+    }
+
+    function handleSelectedMessageChanged() {
+        const previousKey = _observedSelectedKey
+        const selectedKey = selectedMessageKey()
+        if (selectedKey === previousKey) return
+        _observedSelectedKey = selectedKey
+        if (messageOpenPending) {
+            if (selectedKey !== "" && selectedKey !== _pendingMessageKey) {
+                cancelPendingMessageOpen()
+                synchronizeCursorToSelection(true)
+            }
+            return
+        }
+        if (selectedKey !== "") {
+            synchronizeCursorToSelection(true)
+            return
+        }
+        if (_cursorMessageKey === "" || _cursorMessageKey === previousKey)
+            clearCursor()
+    }
+
+    function reconcileCursorToConversations() {
+        const conversations = Array.isArray(store.conversations)
+            ? store.conversations : []
+        const key = messageOpenPending ? _pendingMessageKey : _cursorMessageKey
+        const index = conversationIndexForKey(key)
+        if (index >= 0) {
+            setCursor(index, conversations, messageOpenPending)
+            return
+        }
+        if (messageOpenPending) cancelPendingMessageOpen()
+        synchronizeCursorToSelection(false)
+    }
+
+    function cancelPendingMessageOpen() {
+        messageOpenTimer.stop()
+        _pendingMessageKey = ""
+        _pendingAccountKey = ""
+        _pendingFolderKey = ""
+        _pendingSearchKey = ""
+    }
+
+    function queueMessageOpen(index, conversations) {
+        if (index < 0 || index >= conversations.length) return false
+        const key = String(store.threadKey(conversations[index]) || "")
+        if (key === "") return false
+        setCursor(index, conversations, true)
+        if (key === selectedMessageKey()) {
+            cancelPendingMessageOpen()
+            return true
+        }
+        _pendingMessageKey = key
+        _pendingAccountKey = activeAccountKey
+        _pendingFolderKey = activeFolderKey
+        _pendingSearchKey = activeSearchKey
+        messageOpenTimer.restart()
+        return true
+    }
+
+    function finishPendingMessageOpen() {
+        const key = _pendingMessageKey
+        if (key === "") return
+        if (_pendingAccountKey !== activeAccountKey
+                || _pendingFolderKey !== activeFolderKey
+                || _pendingSearchKey !== activeSearchKey
+                || !messageSelectionShortcutsEnabled) {
+            cancelPendingMessageOpen()
+            synchronizeCursorToSelection(false)
+            return
+        }
+        const targetIndex = conversationIndexForKey(key)
+        if (targetIndex < 0) {
+            cancelPendingMessageOpen()
+            synchronizeCursorToSelection(false)
+            return
+        }
+        const conversations = Array.isArray(store.conversations)
+            ? store.conversations : []
+        setCursor(targetIndex, conversations, true)
+        store.openMessage(conversations[targetIndex])
+        cancelPendingMessageOpen()
+        messageActivated()
     }
 
     function selectRelativeMessage(delta) {
@@ -65,7 +217,9 @@ Rectangle {
             ? store.conversations : []
         if (conversations.length === 0 || delta === 0) return false
 
-        const selectedIndex = selectedConversationIndex()
+        const selectedIndex = cursorIndex >= 0
+            && cursorIndex < conversations.length
+            ? cursorIndex : selectedConversationIndex()
         let nextIndex
         if (selectedIndex < 0) {
             nextIndex = delta > 0 ? 0 : conversations.length - 1
@@ -73,28 +227,24 @@ Rectangle {
             nextIndex = Math.max(0, Math.min(conversations.length - 1,
                 selectedIndex + delta))
             if (nextIndex === selectedIndex) {
-                messageList.currentIndex = selectedIndex
-                messageList.positionViewAtIndex(selectedIndex, ListView.Contain)
+                setCursor(selectedIndex, conversations, true)
                 return false
             }
         }
 
-        messageList.currentIndex = nextIndex
-        messageList.positionViewAtIndex(nextIndex, ListView.Contain)
-        store.openMessage(conversations[nextIndex])
-        messageActivated()
-        return true
+        return queueMessageOpen(nextIndex, conversations)
     }
 
     function cursorContextMenuVisible() {
-        if (messageList.currentIndex < 0) return false
-        const row = messageList.itemAtIndex(messageList.currentIndex)
+        if (cursorIndex < 0) return false
+        const row = messageList.itemAtIndex(cursorIndex)
         return row ? row.contextMenuVisible === true : false
     }
 
     function showCursorContextMenu() {
-        if (messageList.currentIndex < 0) return false
-        const row = messageList.itemAtIndex(messageList.currentIndex)
+        cancelPendingMessageOpen()
+        if (cursorIndex < 0) return false
+        const row = messageList.itemAtIndex(cursorIndex)
         if (!row || typeof row.showContextMenu !== "function") return false
         row.showContextMenu(Math.max(12, row.width / 2),
             Math.max(12, row.height / 2))
@@ -249,9 +399,7 @@ Rectangle {
                 focus: true
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ScrollBar {}
-                currentIndex: store.selectedMessage ? Math.max(0, store.conversations.findIndex(
-                    message => store.threadKey(message)
-                        === store.threadKey(store.selectedMessage))) : 0
+                currentIndex: root.cursorIndex
                 delegate: MessageRow {
                     id: row
                     required property var modelData
@@ -260,18 +408,22 @@ Rectangle {
                     message: modelData
                     avatarResolver: root.store
                     compact: AppSettings.compactMessageList || root.width < 330
-                    selected: store.selectedMessage
-                        && store.threadKey(store.selectedMessage) === store.threadKey(modelData)
+                    selected: index === root.cursorIndex
                     onActivated: {
-                        messageList.currentIndex = index
+                        root.cancelPendingMessageOpen()
+                        root.setCursor(index, store.conversations, true)
                         store.openMessage(modelData)
                         root.messageActivated()
                     }
                     onContextRequested: {
-                        messageList.currentIndex = index
+                        root.cancelPendingMessageOpen()
+                        root.setCursor(index, store.conversations, true)
                         messageList.forceActiveFocus()
                     }
-                    onSelectionRequested: messageList.currentIndex = index
+                    onSelectionRequested: {
+                        root.cancelPendingMessageOpen()
+                        root.setCursor(index, store.conversations, true)
+                    }
                     onComposeRequested: mode => root.requestCompose(mode, modelData)
                     onStarRequested: store.toggleStar(modelData)
                     onArchiveRequested: store.archive(modelData)
@@ -305,10 +457,13 @@ Rectangle {
                             || event.key === Qt.Key_O) {
                         root.openCursor(); event.accepted = true
                     } else if (event.key === Qt.Key_E && currentIndex >= 0) {
+                        root.cancelPendingMessageOpen()
                         store.archive(store.conversations[currentIndex]); event.accepted = true
                     } else if (event.key === Qt.Key_Delete && currentIndex >= 0) {
+                        root.cancelPendingMessageOpen()
                         store.trash(store.conversations[currentIndex]); event.accepted = true
                     } else if (event.key === Qt.Key_S && currentIndex >= 0) {
+                        root.cancelPendingMessageOpen()
                         store.toggleStar(store.conversations[currentIndex]); event.accepted = true
                     }
                 }
@@ -319,6 +474,25 @@ Rectangle {
     Shortcut { sequence: "Ctrl+K"; onActivated: search.forceActiveFocus() }
     Shortcut { sequence: "/"; onActivated: search.forceActiveFocus() }
     Shortcut { sequence: "F5"; onActivated: store.sync() }
+
+    Timer {
+        id: messageOpenTimer
+        interval: Math.max(32, root.messageOpenDelayMs)
+        repeat: false
+        onTriggered: root.finishPendingMessageOpen()
+    }
+
+    Connections {
+        target: root.store
+        function onSelectedMessageChanged() { root.handleSelectedMessageChanged() }
+        function onConversationsChanged() { root.reconcileCursorToConversations() }
+    }
+
+    Component.onCompleted: {
+        _observedSelectedKey = selectedMessageKey()
+        synchronizeCursorToSelection(true)
+    }
+
     Shortcut {
         objectName: "nextMessageShortcut"
         sequence: "Down"
