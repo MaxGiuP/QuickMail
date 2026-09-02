@@ -346,6 +346,16 @@ QtObject {
         threadTruncated = false
     }
 
+    function cancelMessageLoading() {
+        // Detail requests are shared with cache prefetching, so let the RPC
+        // finish while making every callback from the old reader ineligible.
+        ++readerGeneration
+        ++threadGeneration
+        ++threadLoadSerial
+        readerLoading = false
+        threadLoading = false
+    }
+
     function applySnapshot(snapshot) {
         if (!snapshot) return
         if (Array.isArray(snapshot.accounts)) {

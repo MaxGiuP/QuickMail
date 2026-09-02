@@ -88,6 +88,8 @@ Rectangle {
     radius: Theme.radiusSmall
     color: selected ? Theme.surfaceSelected
         : rowMouse.containsMouse ? Theme.surfaceHover : "transparent"
+    border.width: selected ? 2 : 0
+    border.color: Theme.accent
 
     Behavior on color {
         enabled: Theme.animationsEnabled

@@ -31,9 +31,11 @@ Item {
         property var threadResult: null
         property var mailDetail: null
         property var delayedMail: []
+        property var delayedMailGets: []
         property var delayedThreads: []
         property var delayedActions: []
         property var delayedAvatars: []
+        property bool delayMailGet: false
         property bool delayAvatars: false
         property var snapshotResult: ({})
         property var methods: ({
@@ -96,6 +98,11 @@ Item {
                 delayedThreads = pending
             } else if (method === methods.threadGet)
                 callback(threadResult || ({ messages: [], truncated: false }), null)
+            else if (method === methods.mailGet && delayMailGet) {
+                const pending = delayedMailGets.slice()
+                pending.push({ params: params, callback: callback })
+                delayedMailGets = pending
+            }
             else if (method === methods.mailGet)
                 callback(mailDetail || ({}), null)
             else if (method === methods.mailAction && delayActions) {
@@ -325,6 +332,90 @@ Item {
                         === "Cached body is immediately available"
                     && mailGetsAfterReopen === mailGetsBeforeReopen,
                 "reopening a recent message missed the detail LRU or showed a spinner")
+
+            // Moving to another message cancels both parts of the previous
+            // reader load. Late detail and thread callbacks must leave the
+            // current target and its loading state untouched.
+            const supersededMessage = {
+                id: "account-a:superseded-reader", accountId: "account-a",
+                mailboxId: "inbox", threadId: "account-a:superseded-thread",
+                subject: "Superseded reader", read: true,
+                snippet: "This detail should be ignored"
+            }
+            const currentMessage = {
+                id: "account-a:current-reader", accountId: "account-a",
+                mailboxId: "inbox", threadId: "account-a:current-thread",
+                subject: "Current reader", read: true,
+                snippet: "This detail should win"
+            }
+            fakeRpc.delayMailGet = true
+            fakeRpc.delayThread = true
+            fakeRpc.delayedMailGets = []
+            fakeRpc.delayedThreads = []
+            store.messages = [supersededMessage, currentMessage]
+            store.openMessage(supersededMessage)
+            root.expect(store.readerLoading && store.threadLoading
+                    && fakeRpc.delayedMailGets.length === 1
+                    && fakeRpc.delayedThreads.length === 1,
+                "stale reader fixture did not leave detail and thread work pending")
+
+            const readerGenerationBeforeCancel = store.readerGeneration
+            const threadGenerationBeforeCancel = store.threadGeneration
+            const threadSerialBeforeCancel = store.threadLoadSerial
+            store.cancelMessageLoading()
+            root.expect(!store.readerLoading && !store.threadLoading
+                    && store.readerGeneration > readerGenerationBeforeCancel
+                    && store.threadGeneration > threadGenerationBeforeCancel
+                    && store.threadLoadSerial > threadSerialBeforeCancel
+                    && store.messageId(store.selectedMessage)
+                        === supersededMessage.id
+                    && store.threadMessages.length === 1
+                    && store.messageId(store.threadMessages[0])
+                        === supersededMessage.id,
+                "cancelling reader work cleared its visible content")
+
+            store.openMessage(currentMessage)
+            root.expect(store.readerLoading && store.threadLoading
+                    && store.messageId(store.selectedMessage) === currentMessage.id
+                    && fakeRpc.delayedMailGets.length === 2
+                    && fakeRpc.delayedThreads.length === 2,
+                "opening the replacement reader did not start fresh work")
+
+            fakeRpc.delayedMailGets[0].callback(Object.assign({},
+                supersededMessage, { bodyText: "Stale detail body" }), null)
+            fakeRpc.delayedThreads[0].callback({
+                id: supersededMessage.threadId,
+                messages: [Object.assign({}, supersededMessage,
+                    { bodyText: "Stale thread body" })],
+                truncated: false
+            }, null)
+            root.expect(store.readerLoading && store.threadLoading
+                    && store.messageId(store.selectedMessage) === currentMessage.id
+                    && String(store.selectedMessage.bodyText || "")
+                        !== "Stale detail body"
+                    && store.activeThreadId === currentMessage.threadId
+                    && store.threadMessages.length === 1
+                    && store.messageId(store.threadMessages[0]) === currentMessage.id,
+                "a cancelled reader callback overwrote or completed the current target")
+
+            fakeRpc.delayedMailGets[1].callback(Object.assign({}, currentMessage,
+                { bodyText: "Current detail body" }), null)
+            fakeRpc.delayedThreads[1].callback({
+                id: currentMessage.threadId,
+                messages: [currentMessage],
+                truncated: false
+            }, null)
+            root.expect(!store.readerLoading && !store.threadLoading
+                    && store.messageId(store.selectedMessage) === currentMessage.id
+                    && store.selectedMessage.bodyText === "Current detail body"
+                    && store.activeThreadId === currentMessage.threadId
+                    && store.threadMessages.length === 1
+                    && store.messageId(store.threadMessages[0]) === currentMessage.id,
+                "the current reader target did not complete after stale work was ignored")
+            fakeRpc.delayMailGet = false
+            fakeRpc.delayThread = false
+            fakeRpc.delayedMailGets = []
+            fakeRpc.delayedThreads = []
 
             const threadFirst = {
                 id: "account-a:message-1", accountId: "account-a",
