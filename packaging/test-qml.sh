@@ -6,10 +6,12 @@ import_path=${QML_IMPORT_PATH:-/usr/lib/qt6/qml}
 host_import_path=$project_dir/qml/host/quickshell
 test_config_dir=$(mktemp -d "${TMPDIR:-/tmp}/quickmail-qml-config.XXXXXX")
 test_runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/quickmail-qml-runtime.XXXXXX")
+test_xdg_runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/quickmail-xdg-runtime.XXXXXX")
+chmod 700 "$test_xdg_runtime_dir"
 smoke_log=
 cleanup() {
   if [ -n "$smoke_log" ]; then rm -f -- "$smoke_log"; fi
-  rm -rf -- "$test_config_dir" "$test_runtime_dir"
+  rm -rf -- "$test_config_dir" "$test_runtime_dir" "$test_xdg_runtime_dir"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -39,6 +41,7 @@ do
     smoke_timezone=Europe/London
   fi
   if ! TZ="$smoke_timezone" QUICKMAIL_SMOKE="$smoke" XDG_CONFIG_HOME="$test_config_dir" \
+    XDG_RUNTIME_DIR="$test_xdg_runtime_dir" QS_EVENT_LOG_DISABLE=1 \
     QML_IMPORT_PATH="$host_import_path${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}" \
     QT_QPA_PLATFORM=offscreen timeout 10 qs --no-color \
     -p "$test_runtime_dir" >"$smoke_log" 2>&1; then
