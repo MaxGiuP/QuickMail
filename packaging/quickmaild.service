@@ -5,9 +5,12 @@ After=graphical-session.target
 
 [Service]
 Type=simple
+Environment=TOKIO_WORKER_THREADS=4
 ExecStart="@BINDIR@/quickmaild" "--socket=%t/quickmail/daemon.sock" "--database=%S/quickmail/mail.db" "--attachment-cache=%C/quickmail/attachments"
 Restart=on-failure
 RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=30s
 RuntimeDirectory=quickmail
 RuntimeDirectoryMode=0700
 StateDirectory=quickmail

@@ -61,6 +61,15 @@ done
 grep -F 'ExecStart="/usr/bin/quickmaild"' \
     "$stage/usr/share/systemd/user/quickmaild.service" >/dev/null \
     || fail "staged service does not contain the logical-prefix daemon path"
+grep -F 'Environment=TOKIO_WORKER_THREADS=4' \
+    "$stage/usr/share/systemd/user/quickmaild.service" >/dev/null \
+    || fail "staged service does not cap the asynchronous worker pool"
+grep -F 'RestartMaxDelaySec=30s' \
+    "$stage/usr/share/systemd/user/quickmaild.service" >/dev/null \
+    || fail "staged service does not back off repeated daemon failures"
+grep -F 'RestartSteps=5' \
+    "$stage/usr/share/systemd/user/quickmaild.service" >/dev/null \
+    || fail "staged service does not define bounded backoff steps"
 if grep -F "$stage" "$stage/usr/share/systemd/user/quickmaild.service" >/dev/null; then
     fail "DESTDIR leaked into the installed service"
 fi
