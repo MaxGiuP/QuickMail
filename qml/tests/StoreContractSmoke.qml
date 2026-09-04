@@ -163,7 +163,6 @@ Item {
     MailStore {
         id: store
         rpc: fakeRpc
-        messageDetailPrefetchEnabled: false
     }
 
     HtmlMessageView {
@@ -211,6 +210,8 @@ Item {
         running: true
         repeat: false
         onTriggered: {
+            root.expect(!store.messageDetailPrefetchEnabled,
+                "message bodies were not lazy by default")
             root.expect(htmlView.renderedHtml.indexOf("tracker.invalid") < 0,
                 "remote-content toggle left a remote resource in rich HTML")
             root.expect(htmlView.renderedHtml.indexOf("<b>world</b>") >= 0,

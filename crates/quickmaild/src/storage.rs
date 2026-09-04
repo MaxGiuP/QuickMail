@@ -9,13 +9,16 @@ use quickmail_core::{
     Mailbox, MailboxRole, MailboxSyncPage, Message, MessagePage, MessageQuery, MessageSummary,
     OutgoingMessage, SyncStatus, Task, ThreadConversation,
 };
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, named_params, params};
+use rusqlite::{
+    Connection, OptionalExtension, Row, Transaction, params, params_from_iter,
+    types::Value as SqlValue,
+};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const MAX_PAGE_SIZE: u32 = 200;
 const MAX_THREAD_MESSAGES: usize = 100;
 
@@ -1095,45 +1098,25 @@ impl Repository {
 
     fn list_messages(&self, query: &MessageQuery) -> Result<MessagePage, StorageError> {
         let limit = query.limit.clamp(1, MAX_PAGE_SIZE);
-        let (cursor_timestamp, cursor_id) = query
-            .cursor
-            .as_deref()
-            .map(decode_cursor)
-            .transpose()?
-            .map_or((None, None), |(timestamp, id)| (Some(timestamp), Some(id)));
+        let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
         let search = query
             .search
             .as_deref()
             .filter(|value| !value.trim().is_empty());
+        let (sql, parameters) = message_list_query(
+            query.account_id.as_deref(),
+            query.mailbox_id.as_deref(),
+            query.unread_only,
+            cursor
+                .as_ref()
+                .map(|(timestamp, id)| (*timestamp, id.as_str())),
+            search,
+            limit + 1,
+        );
 
         let connection = &self.connection;
-        let mut statement = connection.prepare_cached(
-            "SELECT id, account_id, mailbox_id, thread_id, subject, author_name, author_address,
-                    timestamp_ms, is_read, starred, snippet, has_attachments, labels_json,
-                    provider_data_json
-             FROM messages
-             WHERE (:account_id IS NULL OR account_id = :account_id)
-               AND (:mailbox_id IS NULL OR mailbox_id = :mailbox_id)
-               AND (:unread_only = 0 OR is_read = 0)
-               AND (:cursor_timestamp IS NULL OR timestamp_ms < :cursor_timestamp
-                    OR (timestamp_ms = :cursor_timestamp AND id < :cursor_id))
-               AND (:search IS NULL OR id IN
-                    (SELECT message_id FROM messages_fts WHERE messages_fts MATCH :search))
-             ORDER BY timestamp_ms DESC, id DESC
-             LIMIT :limit",
-        )?;
-        let rows = statement.query_map(
-            named_params! {
-                ":account_id": query.account_id,
-                ":mailbox_id": query.mailbox_id,
-                ":unread_only": query.unread_only,
-                ":cursor_timestamp": cursor_timestamp,
-                ":cursor_id": cursor_id,
-                ":search": search,
-                ":limit": limit + 1,
-            },
-            message_summary_from_row,
-        )?;
+        let mut statement = connection.prepare_cached(&sql)?;
+        let rows = statement.query_map(params_from_iter(parameters), message_summary_from_row)?;
         let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
         let has_more = messages.len() > limit as usize;
         messages.truncate(limit as usize);
@@ -2110,7 +2093,14 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                VALUES (new.id, new.subject, coalesce(new.author_name, '') || ' ' ||
                        coalesce(new.author_address, ''), new.snippet, coalesce(new.body_text, ''));
              END;
-             CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
+             CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages
+             WHEN old.id IS NOT new.id
+               OR old.subject IS NOT new.subject
+               OR old.author_name IS NOT new.author_name
+               OR old.author_address IS NOT new.author_address
+               OR old.snippet IS NOT new.snippet
+               OR old.body_text IS NOT new.body_text
+             BEGIN
                DELETE FROM messages_fts WHERE message_id=old.id;
                INSERT INTO messages_fts(message_id, subject, author, snippet, body_text)
                VALUES (new.id, new.subject, coalesce(new.author_name, '') || ' ' ||
@@ -2149,10 +2139,10 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
                message_json TEXT NOT NULL, updated_at INTEGER NOT NULL
              );
              CREATE INDEX idx_drafts_account_updated ON drafts(account_id, updated_at DESC, id);
-             PRAGMA user_version=8;
+             PRAGMA user_version=9;
              COMMIT;",
         )?;
-        version = 8;
+        version = 9;
     }
     if version == 1 {
         connection.execute_batch(
@@ -2265,6 +2255,50 @@ fn migrate(connection: &Connection) -> Result<(), StorageError> {
              PRAGMA user_version=8;
              COMMIT;",
         )?;
+        version = 8;
+    }
+    if version == 8 {
+        let complete_messages_schema = [
+            "id",
+            "subject",
+            "author_name",
+            "author_address",
+            "snippet",
+            "body_text",
+        ]
+        .into_iter()
+        .map(|column| table_has_column(connection, "messages", column))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .all(|present| present)
+            && table_has_column(connection, "messages_fts", "message_id")?;
+        if complete_messages_schema {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DROP TRIGGER IF EXISTS messages_fts_update;
+                 CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages
+                 WHEN old.id IS NOT new.id
+                   OR old.subject IS NOT new.subject
+                   OR old.author_name IS NOT new.author_name
+                   OR old.author_address IS NOT new.author_address
+                   OR old.snippet IS NOT new.snippet
+                   OR old.body_text IS NOT new.body_text
+                 BEGIN
+                   DELETE FROM messages_fts WHERE message_id=old.id;
+                   INSERT INTO messages_fts(message_id, subject, author, snippet, body_text)
+                   VALUES (new.id, new.subject, coalesce(new.author_name, '') || ' ' ||
+                           coalesce(new.author_address, ''), new.snippet,
+                           coalesce(new.body_text, ''));
+                 END;
+                 PRAGMA user_version=9;
+                 COMMIT;",
+            )?;
+        } else {
+            // A few early development databases intentionally lack the full
+            // message/FTS schema. Keep them readable for account recovery just
+            // as the older optional-index migrations do.
+            connection.pragma_update(None, "user_version", 9)?;
+        }
     }
     Ok(())
 }
@@ -2280,6 +2314,63 @@ fn table_has_column(
         .query_row(params![table, column], |_| Ok(()))
         .optional()?
         .is_some())
+}
+
+fn message_list_query(
+    account_id: Option<&str>,
+    mailbox_id: Option<&str>,
+    unread_only: bool,
+    cursor: Option<(i64, &str)>,
+    search: Option<&str>,
+    limit: u32,
+) -> (String, Vec<SqlValue>) {
+    let mut sql = String::from(
+        "SELECT id, account_id, mailbox_id, thread_id, subject, author_name, author_address,
+                timestamp_ms, is_read, starred, snippet, has_attachments, labels_json,
+                provider_data_json
+         FROM messages",
+    );
+    let mut predicates = Vec::new();
+    let mut parameters = Vec::new();
+
+    if let Some(account_id) = account_id {
+        let parameter = push_sql_parameter(&mut parameters, SqlValue::Text(account_id.to_owned()));
+        predicates.push(format!("account_id = ?{parameter}"));
+    }
+    if let Some(mailbox_id) = mailbox_id {
+        let parameter = push_sql_parameter(&mut parameters, SqlValue::Text(mailbox_id.to_owned()));
+        predicates.push(format!("mailbox_id = ?{parameter}"));
+    }
+    if unread_only {
+        predicates.push("is_read = 0".into());
+    }
+    if let Some((timestamp, id)) = cursor {
+        let timestamp_parameter = push_sql_parameter(&mut parameters, SqlValue::Integer(timestamp));
+        let id_parameter = push_sql_parameter(&mut parameters, SqlValue::Text(id.to_owned()));
+        predicates.push(format!(
+            "(timestamp_ms, id) < (?{timestamp_parameter}, ?{id_parameter})"
+        ));
+    }
+    if let Some(search) = search {
+        let parameter = push_sql_parameter(&mut parameters, SqlValue::Text(search.to_owned()));
+        predicates.push(format!(
+            "id IN (SELECT message_id FROM messages_fts WHERE messages_fts MATCH ?{parameter})"
+        ));
+    }
+    if !predicates.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&predicates.join(" AND "));
+    }
+    let limit_parameter = push_sql_parameter(&mut parameters, SqlValue::Integer(i64::from(limit)));
+    sql.push_str(&format!(
+        " ORDER BY timestamp_ms DESC, id DESC LIMIT ?{limit_parameter}"
+    ));
+    (sql, parameters)
+}
+
+fn push_sql_parameter(parameters: &mut Vec<SqlValue>, value: SqlValue) -> usize {
+    parameters.push(value);
+    parameters.len()
 }
 
 fn message_summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
@@ -2957,6 +3048,67 @@ mod tests {
         assert_eq!(preserved.body_html, html.body_html);
     }
 
+    #[test]
+    fn schema_eight_migration_skips_fts_work_for_non_content_updates() {
+        let mut repository = Repository::open_in_memory().unwrap();
+        repository.upsert_account(&account()).unwrap();
+        repository.upsert_messages(&[message(44)]).unwrap();
+        repository
+            .connection
+            .execute_batch(
+                "DROP TRIGGER messages_fts_update;
+                 CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
+                   DELETE FROM messages_fts WHERE message_id=old.id;
+                   INSERT INTO messages_fts(message_id, subject, author, snippet, body_text)
+                   VALUES (new.id, new.subject, coalesce(new.author_name, '') || ' ' ||
+                           coalesce(new.author_address, ''), new.snippet,
+                           coalesce(new.body_text, ''));
+                 END;
+                 PRAGMA user_version=8;",
+            )
+            .unwrap();
+
+        migrate(&repository.connection).unwrap();
+
+        assert_eq!(repository.schema_version().unwrap(), SCHEMA_VERSION);
+        let trigger_sql: String = repository
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type='trigger' AND name='messages_fts_update'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(trigger_sql.contains("WHEN old.id IS NOT new.id"));
+
+        let changes_before = repository.connection.total_changes();
+        repository
+            .connection
+            .execute(
+                "UPDATE messages SET is_read=1 WHERE id=?1",
+                ["account-1:message-00044"],
+            )
+            .unwrap();
+        assert_eq!(repository.connection.total_changes() - changes_before, 1);
+
+        repository
+            .connection
+            .execute(
+                "UPDATE messages SET subject='Searchable replacement' WHERE id=?1",
+                ["account-1:message-00044"],
+            )
+            .unwrap();
+        let matches = repository
+            .list_messages(&MessageQuery {
+                search: Some("replacement".into()),
+                ..MessageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(matches.messages.len(), 1);
+        assert_eq!(matches.messages[0].subject, "Searchable replacement");
+    }
+
     #[tokio::test]
     async fn task_upsert_creates_and_updates_external_id() {
         let database = Database::open_in_memory().unwrap();
@@ -3270,6 +3422,34 @@ mod tests {
                 .as_deref(),
             Some("large lazy body 420")
         );
+    }
+
+    #[test]
+    fn account_mailbox_message_query_uses_the_page_index() {
+        let repository = Repository::open_in_memory().unwrap();
+        for cursor in [None, Some((1_700_000_000_000, "account-1:message-00044"))] {
+            let (sql, parameters) =
+                message_list_query(Some("account-1"), Some("inbox"), false, cursor, None, 51);
+            assert!(!sql.contains(" IS NULL OR "), "{sql}");
+            let mut statement = repository
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let plan = statement
+                .query_map(params_from_iter(parameters), |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.contains("idx_messages_account_mailbox_page")),
+                "unexpected query plan: {plan:?}"
+            );
+            assert!(
+                plan.iter().all(|detail| !detail.contains("SCAN messages")),
+                "unexpected full scan: {plan:?}"
+            );
+        }
     }
 
     #[tokio::test]

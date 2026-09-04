@@ -2966,7 +2966,18 @@ fn validate_id_with_limit(id: &str, name: &str, max_len: usize) -> Result<(), Rp
 fn is_parallel_reader_method(rpc_method: &str) -> bool {
     matches!(
         rpc_method,
-        method::MAIL_GET | method::THREAD_GET | method::AVATAR_FETCH
+        method::PING
+            | method::DASHBOARD_SNAPSHOT
+            | method::ACCOUNTS_LIST
+            | method::MAILBOXES_LIST
+            | method::MAIL_LIST
+            | method::MAIL_GET
+            | method::THREAD_GET
+            | method::DRAFT_LIST
+            | method::DRAFT_GET
+            | method::TASK_LIST
+            | method::CALENDAR_LIST
+            | method::AVATAR_FETCH
     )
 }
 
@@ -5442,7 +5453,7 @@ mod tests {
         writer
             .write_all(
                 format!(
-                    "{}\n{}\n",
+                    "{}\n{}\n{}\n",
                     json!({
                         "jsonrpc": "2.0", "id": 2, "method": "thread.get",
                         "params": {"messageId": message.summary.id}
@@ -5450,6 +5461,14 @@ mod tests {
                     json!({
                         "jsonrpc": "2.0", "id": 3, "method": "mail.get",
                         "params": {"messageId": message.summary.id}
+                    }),
+                    json!({
+                        "jsonrpc": "2.0", "id": 4, "method": "mail.list",
+                        "params": {
+                            "accountId": account.id,
+                            "mailboxId": "inbox",
+                            "limit": 20
+                        }
                     })
                 )
                 .as_bytes(),
@@ -5458,7 +5477,7 @@ mod tests {
             .unwrap();
 
         let mut completed = HashSet::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let mut line = String::new();
             tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
                 .await
@@ -5481,10 +5500,17 @@ mod tests {
                     );
                     completed.insert(3);
                 }
+                RpcId::Number(4) => {
+                    assert_eq!(
+                        response.result.unwrap()["messages"][0]["id"],
+                        message.summary.id
+                    );
+                    completed.insert(4);
+                }
                 id => panic!("blocked action completed before release: {id:?}"),
             }
         }
-        assert_eq!(completed, HashSet::from([2, 3]));
+        assert_eq!(completed, HashSet::from([2, 3, 4]));
 
         action_release.add_permits(1);
         let mut line = String::new();
@@ -6621,14 +6647,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_avatar_keys_share_a_lock_and_use_the_reader_lane() {
+    async fn duplicate_avatar_keys_share_a_lock_and_cached_reads_use_the_reader_lane() {
         let daemon = Daemon::new(Database::open_in_memory().unwrap());
         let first = daemon.avatar_key_lock("same-avatar").await;
         let duplicate = daemon.avatar_key_lock("same-avatar").await;
         let other = daemon.avatar_key_lock("other-avatar").await;
         assert!(Arc::ptr_eq(&first, &duplicate));
         assert!(!Arc::ptr_eq(&first, &other));
-        assert!(is_parallel_reader_method(method::AVATAR_FETCH));
-        assert!(!is_parallel_reader_method(method::MAIL_ACTION));
+        for method in [
+            method::PING,
+            method::DASHBOARD_SNAPSHOT,
+            method::ACCOUNTS_LIST,
+            method::MAILBOXES_LIST,
+            method::MAIL_LIST,
+            method::MAIL_GET,
+            method::THREAD_GET,
+            method::DRAFT_LIST,
+            method::DRAFT_GET,
+            method::TASK_LIST,
+            method::CALENDAR_LIST,
+            method::AVATAR_FETCH,
+        ] {
+            assert!(is_parallel_reader_method(method), "{method}");
+        }
+        for method in [
+            method::ACCOUNTS_ADD,
+            method::MAIL_ACTION,
+            method::DRAFT_SAVE,
+            method::TASK_CREATE,
+            method::CALENDAR_CREATE,
+            method::AGENDA_SYNC,
+            method::SYNC_START,
+        ] {
+            assert!(!is_parallel_reader_method(method), "{method}");
+        }
     }
 }

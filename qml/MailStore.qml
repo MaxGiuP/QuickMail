@@ -66,7 +66,7 @@ QtObject {
     property var messageDetailWaiters: ({})
     property var detailPrefetchQueue: []
     property int detailPrefetchGeneration: 0
-    property bool messageDetailPrefetchEnabled: true
+    property bool messageDetailPrefetchEnabled: false
     property var ownedMailRevisions: ({})
     property var ownedMailRevisionOrder: []
     property var pendingMailRevisions: []
